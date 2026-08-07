@@ -32,8 +32,10 @@ is OFF by default; enable with ``--safety``.
 from __future__ import annotations
 
 import argparse
+import collections
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -51,6 +53,66 @@ STATE_ACTION_NAMES = (
     "wrist_roll.pos",
     "gripper.pos",
 )
+
+
+class RTCInference:
+    """Asynchronous policy inference with a rolling action queue (openpi-style RTC).
+
+    A background thread keeps re-inferring 50-step chunks from the latest
+    observation while the control loop consumes actions at 30 Hz, so inference
+    overlaps execution instead of blocking it.
+    """
+
+    def __init__(self, policy, queue_threshold: int = 30, guidance_weight: float = 10.0):
+        self.policy = policy
+        self.threshold = queue_threshold
+        # 10 -> follow predictions exactly; lower values smooth toward the
+        # previously executed action.
+        self.guidance = guidance_weight / 10.0
+        self._obs = None
+        self._obs_lock = threading.Lock()
+        self._actions: collections.deque = collections.deque()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._infer_loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def update_observation(self, env_obs: dict) -> None:
+        with self._obs_lock:
+            self._obs = env_obs
+
+    def pop_action(self, last: np.ndarray | None) -> np.ndarray | None:
+        with self._lock:
+            if not self._actions:
+                return None
+            raw = np.asarray(self._actions.popleft(), dtype=np.float32)
+        if last is not None and self.guidance < 1.0:
+            return last + self.guidance * (raw - last)
+        return raw
+
+    def _infer_loop(self) -> None:
+        while not self._stop.is_set():
+            with self._obs_lock:
+                obs = self._obs
+            if obs is None:
+                time.sleep(0.01)
+                continue
+            with self._lock:
+                need = len(self._actions) < self.threshold
+            if not need:
+                time.sleep(0.01)
+                continue
+            with torch.no_grad():
+                actions, _ = self.policy.predict_action_batch(obs)
+            chunk = actions[0].float().cpu().numpy()
+            with self._lock:
+                if len(self._actions) < self.threshold:
+                    self._actions.extend(t for t in chunk)
 
 
 def build_model_cfg(checkpoint: Path, num_steps: int) -> OmegaConf:
@@ -108,6 +170,15 @@ def main() -> None:
                              "(so_follower/so101.json is auto-loaded when id=so101)")
     parser.add_argument("--max-segments", type=int, default=0,
                         help="stop after N inference cycles (0 = run forever)")
+    parser.add_argument("--rtc", action="store_true",
+                        help="asynchronous real-time control (openpi-style RTC): a background thread keeps "
+                             "inferring 50-step chunks while the loop executes at --frequency")
+    parser.add_argument("--rtc-queue-threshold", type=int, default=30,
+                        help="re-infer when queued actions fall below this")
+    parser.add_argument("--rtc-execution-horizon", type=int, default=20,
+                        help="accepted for openpi parity; scheduling is threshold-driven")
+    parser.add_argument("--rtc-max-guidance-weight", type=float, default=10.0,
+                        help="10 = follow predictions exactly; lower values smooth toward the last executed action")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -160,6 +231,13 @@ def main() -> None:
     step_dt = 1.0 / args.frequency
     execute = args.execute_steps or 50
     segment = 0
+    rtc = None
+    if args.rtc:
+        rtc = RTCInference(policy, args.rtc_queue_threshold, args.rtc_max_guidance_weight)
+        rtc.start()
+        print(f"[deploy] RTC on (queue_threshold={args.rtc_queue_threshold} "
+              f"guidance={args.rtc_max_guidance_weight})")
+    last_cmd = None
     try:
         while True:
             obs = robot.get_observation()
@@ -172,22 +250,34 @@ def main() -> None:
             if not args.no_cameras:
                 env_obs["wrist_images"] = np.asarray(obs["wrist"])[None]
 
-            with torch.no_grad():
-                actions, _ = policy.predict_action_batch(env_obs)
-            chunk = actions[0].float().cpu().numpy()  # model always predicts 50 steps
-
-            print(f"[deploy] segment={segment} state={state.tolist()} "
-                  f"pred[0]={chunk[0].tolist()}")
-            for t in range(min(execute, len(chunk))):
-                robot.send_action(
-                    {name: float(chunk[t, i]) for i, name in enumerate(STATE_ACTION_NAMES)}
-                )
+            if rtc is not None:
+                rtc.update_observation(env_obs)
+                cmd = rtc.pop_action(last_cmd)
+                if cmd is not None:
+                    last_cmd = cmd
+                if last_cmd is not None:
+                    robot.send_action(
+                        {name: float(last_cmd[i]) for i, name in enumerate(STATE_ACTION_NAMES)}
+                    )
                 time.sleep(step_dt)
+            else:
+                with torch.no_grad():
+                    actions, _ = policy.predict_action_batch(env_obs)
+                chunk = actions[0].float().cpu().numpy()  # model always predicts 50 steps
+                print(f"[deploy] segment={segment} state={state.tolist()} "
+                      f"pred[0]={chunk[0].tolist()}")
+                for t in range(min(execute, len(chunk))):
+                    robot.send_action(
+                        {name: float(chunk[t, i]) for i, name in enumerate(STATE_ACTION_NAMES)}
+                    )
+                    time.sleep(step_dt)
 
             segment += 1
             if args.max_segments and segment >= args.max_segments:
                 break
     finally:
+        if rtc is not None:
+            rtc.stop()
         print("[deploy] disconnecting")
         robot.disconnect()
 
