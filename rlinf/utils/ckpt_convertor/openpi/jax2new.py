@@ -54,6 +54,20 @@ def _load_jax_params(checkpoint_dir: str | pathlib.Path) -> dict:
 
     params_dir = pathlib.Path(checkpoint_dir) / "params"
     restored = ocp.PyTreeCheckpointer().restore(str(params_dir))
+
+
+    def unwrap_value(tree):
+        if isinstance(tree, dict):
+            if set(tree.keys()) == {"value"}:
+                return unwrap_value(tree["value"])
+            return {
+                k: unwrap_value(v)
+                for k, v in tree.items()
+            }
+        return tree
+
+    restored = unwrap_value(restored)
+
     restored = jax.tree_util.tree_map(
         lambda x: np.asarray(x, dtype=np.float32), restored
     )

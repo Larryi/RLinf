@@ -40,13 +40,18 @@ except ModuleNotFoundError:  # lerobot < 0.2
 from openpi.transforms import DataTransformFn
 from torch.utils.data import Dataset
 
-from rlinf.models.embodiment.openpi.policies import franka_policy, libero_policy
+from rlinf.models.embodiment.openpi.policies import (
+    franka_policy,
+    libero_policy,
+    so101_policy,
+)
 
 from .common import BaseDataLoaderImpl, ReCapMixtureDataset
 from .utils import (
     decode_image_struct_batch,
     load_returns_sidecar,
     load_task_descriptions,
+    validate_lerobot_v3_stack,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,6 +88,13 @@ _REPACK_KEYS = {
         "observation/wrist_image": "wrist_image",
         "observation/state": "state",
         "actions": "actions",
+        "prompt": "prompt",
+    },
+    "so101": {
+        "observation.images.front": "observation.images.front",
+        "observation.images.wrist": "observation.images.wrist",
+        "observation.state": "observation.state",
+        "actions": "action",
         "prompt": "prompt",
     },
 }
@@ -233,6 +245,7 @@ class ValueDataset(Dataset):
 
         self.max_samples = max_samples
         local_path = Path(dataset_path).absolute()
+        validate_lerobot_v3_stack(local_path)
 
         self.dataset_meta = LeRobotDatasetMetadata(local_path.name, root=local_path)
         if "action" in self.dataset_meta.features:
@@ -277,12 +290,20 @@ class ValueDataset(Dataset):
                 selected = set(rng.choice(all_eps, size=num, replace=False).tolist())
             else:
                 selected = set(all_eps[:num])
-            idx = self._base.episode_data_index
-            self._indices = [
-                i
-                for ep in sorted(selected)
-                for i in range(idx["from"][ep].item(), idx["to"][ep].item())
-            ]
+            if hasattr(self._base, "episode_data_index"):  # lerobot < 0.4
+                idx = self._base.episode_data_index
+                self._indices = [
+                    i
+                    for ep in sorted(selected)
+                    for i in range(idx["from"][ep].item(), idx["to"][ep].item())
+                ]
+            else:  # lerobot >= 0.4 (v3): filter by hf_dataset episode_index column
+                ep_arr = np.asarray(self._base.hf_dataset["episode_index"])
+                self._indices = [
+                    i
+                    for ep in sorted(selected)
+                    for i in np.where(ep_arr == ep)[0].tolist()
+                ]
 
         self._transform = self._build_transform(
             robot_type=robot_type,
@@ -332,6 +353,8 @@ class ValueDataset(Dataset):
                     model_type=model_type_enum,
                 )
             )
+        elif robot == "so101":
+            transforms_list.append(so101_policy.SO101Inputs())
 
         transforms_list.append(_openpi_transforms.InjectDefaultPrompt(default_prompt))
         transforms_list.append(_openpi_transforms.PadStatesAndActions(action_dim))

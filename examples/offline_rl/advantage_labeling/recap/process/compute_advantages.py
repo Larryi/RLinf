@@ -27,7 +27,6 @@ Usage:
 """
 
 import gc
-import json
 import logging
 import os
 
@@ -44,10 +43,17 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed as dist
-from lerobot.common.datasets.lerobot_dataset import (
-    LeRobotDataset,
-    LeRobotDatasetMetadata,
-)
+
+try:  # LeRobot >= 0.4, including v3 datasets
+    from lerobot.datasets.lerobot_dataset import (
+        LeRobotDataset,
+        LeRobotDatasetMetadata,
+    )
+except ModuleNotFoundError:  # Legacy LeRobot layout
+    from lerobot.common.datasets.lerobot_dataset import (
+        LeRobotDataset,
+        LeRobotDatasetMetadata,
+    )
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
@@ -58,6 +64,8 @@ from rlinf.data.datasets.recap.utils import (
     decode_image_struct_batch,
     load_return_stats_from_dataset,
     load_returns_sidecar,
+    load_task_descriptions,
+    validate_lerobot_v3_stack,
 )
 from rlinf.data.process.advantage import apply_boolean_label, quantile_threshold
 from rlinf.data.process.distributed import (
@@ -111,6 +119,12 @@ KEY_MAPPINGS = {
         "image": "observation/image",
         "wrist_image": "observation/wrist_image",
         "state": "observation/state",
+        "task": "prompt",
+    },
+    "so101": {
+        "observation.images.front": "observation/image",
+        "observation.images.wrist": "observation/wrist_image",
+        "observation.state": "observation/state",
         "task": "prompt",
     },
     "droid": {
@@ -244,7 +258,8 @@ def load_lerobot_dataset(
     Returns:
         Tuple of (dataset, tasks_dict, metadata, returns_sidecar)
     """
-    meta = LeRobotDatasetMetadata(str(dataset_path))
+    validate_lerobot_v3_stack(dataset_path)
+    meta = LeRobotDatasetMetadata(dataset_path.name, root=dataset_path)
 
     logger.info(f"Dataset features: {list(meta.features.keys())}")
 
@@ -277,20 +292,13 @@ def load_lerobot_dataset(
     logger.info(f"  FPS: {meta.fps}")
 
     dataset = LeRobotDataset(
-        str(dataset_path),
+        dataset_path.name,
+        root=dataset_path,
         download_videos=False,
     )
     dataset.hf_dataset.set_transform(decode_image_struct_batch)
 
-    tasks = {}
-    tasks_path = dataset_path / "meta" / "tasks.jsonl"
-    if tasks_path.exists():
-        with open(tasks_path, "r") as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                task_idx = entry.get("task_index", len(tasks))
-                task_desc = entry.get("task", "")
-                tasks[task_idx] = task_desc
+    tasks = load_task_descriptions(dataset_path)
 
     logger.info(
         f"Loaded dataset: {len(dataset)} samples, {meta.total_episodes} episodes"
@@ -520,8 +528,13 @@ def compute_advantages_for_dataset(
     extended_size = extended_end - shard_start
 
     ep_ends = {}
-    for ep_idx in range(len(dataset.episode_data_index["to"])):
-        ep_ends[ep_idx] = int(dataset.episode_data_index["to"][ep_idx].item())
+    if hasattr(dataset, "episode_data_index"):  # lerobot < 0.4
+        for ep_idx in range(len(dataset.episode_data_index["to"])):
+            ep_ends[ep_idx] = int(dataset.episode_data_index["to"][ep_idx].item())
+    else:  # lerobot >= 0.4 (v3): derive episode end indices from hf_dataset
+        ep_col = dataset.hf_dataset["episode_index"]
+        for gidx, ep in enumerate(ep_col):
+            ep_ends[int(ep)] = gidx + 1  # last occurrence wins = episode end + 1
 
     if rank == 0:
         logger.info(

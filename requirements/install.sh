@@ -9,6 +9,12 @@ ENV_NAME=""
 VENV_DIR=".venv"
 PYTHON_VERSION="3.11.14"
 LEROBOT_COMMIT="0cf864870cf29f4738d3ade893e6fd13fbd7cdb5"
+# LeRobot v3 dataset stack. Must stay on 0.4.x: 0.5+ requires Python>=3.12 and
+# uses PEP 695 generic syntax (e.g. `class Backtrackable[T]`) that Python 3.11
+# cannot even compile. 0.4.4 is the last 3.11-compatible release and already
+# supports v3 datasets (datasets>=4.0, codebase v3.0).
+LEROBOT_V3_COMMIT="v0.4.4"
+INSTALL_LEROBOT_V3=0
 TORCH_VERSION=""
 SGLANG_VERSION=""
 ENGINE=""
@@ -138,6 +144,8 @@ Common options:
                            toolchain or when the platform has no flash-attn support (Ascend).
     --no-apex              Skip apex install. Useful when Megatron-LM is not needed and
                            CUDA toolchain mismatch prevents download apex of the right version.
+    --lerobot-v3           Install the Python 3.11-compatible LeRobot v3 dataset stack
+                           (LeRobot 0.4.4 + datasets 4.1.1) into this dedicated venv.
     --install-rlinf        Install RLinf itself into the python.
 EOF
 }
@@ -260,6 +268,10 @@ parse_args() {
                 ;;
             --no-apex)
                 DISABLE_APEX=1
+                shift
+                ;;
+            --lerobot-v3)
+                INSTALL_LEROBOT_V3=1
                 shift
                 ;;
             --*)
@@ -1943,6 +1955,24 @@ install_lerobot() {
         "git+${GITHUB_PREFIX}https://github.com/huggingface/lerobot.git@${LEROBOT_COMMIT}"
 }
 
+install_lerobot_v3() {
+    local lerobot_v3_path
+    lerobot_v3_path=$(clone_or_reuse_repo \
+        LEROBOT_V3_PATH "$VENV_DIR/lerobot-v3" \
+        "https://github.com/huggingface/lerobot.git")
+    git -C "$lerobot_v3_path" checkout --detach "$LEROBOT_V3_COMMIT"
+
+    # Install LeRobot 0.4.4 FIRST (editable, --no-deps) so it replaces the
+    # lerobot 0.3.x pulled in by rlinf-openpi; otherwise that 0.3.x package's
+    # `datasets<=3.6.0` pin would drag datasets back down below 4.x.
+    # --no-deps preserves RLinf's tested torch 2.11 stack; this task uses only
+    # LeRobot's v3 dataset APIs, not its policy-training or hardware deps.
+    pushd "$lerobot_v3_path" >/dev/null
+    uv pip install --no-deps -e .
+    uv pip install "datasets==4.1.1"
+    popd >/dev/null
+}
+
 install_franka_realworld_env() {
     uv sync --extra franka --active $NO_INSTALL_RLINF_CMD
     install_lerobot
@@ -2781,6 +2811,9 @@ main() {
                     install_env_only
                     ;;
             esac
+            if [ "$INSTALL_LEROBOT_V3" -eq 1 ]; then
+                install_lerobot_v3
+            fi
             ;;
         agentic)
             create_and_sync_venv

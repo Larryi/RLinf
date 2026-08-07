@@ -1,0 +1,26 @@
+# Compute RECAP return sidecars for the SO-101 90-demo + 50-rollout mixture.
+#
+# Local paths are the defaults.  On VastAI, point the two environment
+# variables at the directories downloaded from Hugging Face.
+data:
+  train_data_paths:
+    - dataset_path: ${oc.env:SO101_RECAP_DEMO_DATASET,/mnt/pqssd/so101/datasets/merged_lerobot_dataset_with_dagger30_trimmed}
+      type: sft
+    - dataset_path: ${oc.env:SO101_RECAP_ROLLOUT_DATASET,/mnt/pqssd/so101/datasets/pi05_jax_rtc_rollouts_50_v3}
+      type: rollout
+  # Per-entry type takes precedence. This fallback is intentionally rollout,
+  # so an unlabeled non-SFT dataset can never be silently treated as success.
+  dataset_type: rollout
+  gamma: 1.0
+  # Both timeout and failure have is_success=false in the rollout sidecar and
+  # therefore receive this same terminal reward.
+  failure_reward: -300.0
+  tag: so101
+  num_workers: 16
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

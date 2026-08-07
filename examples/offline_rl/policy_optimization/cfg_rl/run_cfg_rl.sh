@@ -21,7 +21,9 @@ export OPENCV_LOG_LEVEL=off
 
 export PYTHONPATH="${REPO_PATH}:${LIBERO_REPO_PATH}:$PYTHONPATH"
 
-source switch_env openpi 2>/dev/null || true
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    source switch_env openpi 2>/dev/null || true
+fi
 
 if [ -z "$1" ]; then
     CONFIG_NAME="cfg_rl_openpi"

@@ -73,8 +73,27 @@ from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import (
     LeRobotAlohaDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.so101_dataconfig import (
+    LeRobotSO101DataConfig,
+)
 
 _CONFIGS = [
+    TrainConfig(
+        name="pi05_so101",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=True,
+        ),
+        data=LeRobotSO101DataConfig(
+            repo_id="physical-intelligence/behavior",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(asset_id="physical-intelligence/behavior"),
+        ),
+        batch_size=1,
+        num_workers=4,
+    ),
     TrainConfig(
         name="pi0_libero",
         model=pi0_config.Pi0Config(),

@@ -160,7 +160,7 @@ class FSDPStrategy(FSDPStrategyBase):
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=model,
             config=self.cfg.fsdp_config,
-            is_lora=self.cfg.model.is_lora,
+            is_lora=self.cfg.model.get("is_lora", False),
             model_type=self.cfg.model.model_type,
         )
 
@@ -169,6 +169,11 @@ class FSDPStrategy(FSDPStrategyBase):
         )
 
         cpu_offload = CPUOffload(offload_params=self.cfg.fsdp_config.cpu_offload)
+        if self.cfg.fsdp_config.get("cpu_offload", False):
+            # torch FSDP requires parameters to be on CPU when wrapping with
+            # parameter CPU offloading enabled; get_model() moved them to the
+            # GPU, so move them back before FSDP takes over the offload logic.
+            model = model.to("cpu")
 
         fsdp_model = FSDP(
             module=model,

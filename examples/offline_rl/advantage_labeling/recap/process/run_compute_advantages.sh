@@ -19,7 +19,9 @@
 
 set -e
 
-source switch_env openpi 2>/dev/null || true
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    source switch_env openpi 2>/dev/null || true
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export REPO_PATH=$(dirname $(dirname $(dirname $(dirname $(dirname "$SCRIPT_DIR")))))

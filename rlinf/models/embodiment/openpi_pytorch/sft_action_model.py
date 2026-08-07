@@ -72,6 +72,49 @@ class OpenPiPytorchSFTActionModel(OpenPiPytorchActionModel):
         """Alias kept for interface parity with the old action model."""
         return self.sft_forward(data)
 
+    def freeze_vlm(self) -> int:
+        """Freeze SigLIP and Gemma expert 0, leaving the action expert trainable."""
+        frozen = 0
+        for parameter in self.model.img.parameters():
+            if parameter.requires_grad:
+                parameter.requires_grad = False
+                frozen += 1
+
+        llm = self.model.llm
+        for parameter in llm.embedder.parameters():
+            if parameter.requires_grad:
+                parameter.requires_grad = False
+                frozen += 1
+        for block in llm.layers:
+            for module in (
+                block.pre_attention_norms[0],
+                block.pre_ffw_norms[0],
+                block.mlps[0],
+            ):
+                for parameter in module.parameters():
+                    if parameter.requires_grad:
+                        parameter.requires_grad = False
+                        frozen += 1
+            for projections in (
+                block.attn.q_proj,
+                block.attn.k_proj,
+                block.attn.v_proj,
+                block.attn.o_proj,
+            ):
+                projection = projections[0]
+                if projection is None:
+                    continue
+                for parameter in projection.parameters():
+                    if parameter.requires_grad:
+                        parameter.requires_grad = False
+                        frozen += 1
+        if llm.final_norms[0] is not None:
+            for parameter in llm.final_norms[0].parameters():
+                if parameter.requires_grad:
+                    parameter.requires_grad = False
+                    frozen += 1
+        return frozen
+
     @staticmethod
     def _unpack_sft_batch(data: Any) -> tuple[Any, Any]:
         if isinstance(data, (tuple, list)):

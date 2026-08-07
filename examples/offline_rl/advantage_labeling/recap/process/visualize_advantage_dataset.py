@@ -42,8 +42,15 @@ Usage:
 
 import argparse
 import json
+import multiprocessing
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
+
+# Make the rlinf package importable regardless of the cwd the user launched from.
+sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
 
 import matplotlib
 
@@ -134,13 +141,11 @@ def get_episode_indices(dataset: LeRobotDataset, episode_index: int) -> list[int
             end = int(ep_data["to"][episode_index].item())
             return list(range(start, end))
 
-    # Fallback: scan
-    indices = []
-    for idx in range(len(dataset)):
-        sample = dataset[idx]
-        if int(to_scalar(sample["episode_index"])) == episode_index:
-            indices.append(idx)
-    return sorted(indices)
+    # lerobot >= 0.4 (v3): locate frames via the hf_dataset episode_index
+    # column in one pass (no per-sample decoding), instead of scanning
+    # dataset[idx] for every sample.
+    ep_arr = dataset.hf_dataset["episode_index"]
+    return [i for i, ep in enumerate(ep_arr) if int(ep) == episode_index]
 
 
 def create_advantage_distribution_plot(
@@ -780,6 +785,51 @@ def create_episode_summary_plot(
     plt.close(fig)
 
 
+def _process_one_episode(args: tuple) -> tuple[int, str]:
+    """Render summary plot + video for one episode in a worker process.
+
+    The dataset is (re)loaded inside the worker via fork inheritance-free
+    arguments (paths only), so ProcessPoolExecutor never pickles the
+    LeRobotDataset / DataFrame objects.
+    """
+    (
+        ep_idx,
+        dataset_path,
+        image_keys,
+        adv_parquet,
+        output_dir,
+        threshold,
+        fps,
+        make_video,
+    ) = args
+
+    dataset, _meta, tasks = load_dataset(Path(dataset_path))
+    adv_df = (
+        pd.read_parquet(adv_parquet)
+        if adv_parquet and Path(adv_parquet).exists()
+        else pd.DataFrame()
+    )
+
+    ep_data = get_episode_data(
+        dataset=dataset,
+        episode_index=ep_idx,
+        tasks=tasks,
+        image_keys=image_keys,
+        adv_df=adv_df,
+    )
+    if ep_data is None:
+        return ep_idx, "no-data"
+
+    plot_path = Path(output_dir) / f"episode_{ep_idx:04d}_summary.png"
+    create_episode_summary_plot(ep_data, plot_path, threshold=threshold)
+
+    if make_video:
+        video_path = Path(output_dir) / f"episode_{ep_idx:04d}.mp4"
+        create_episode_video(ep_data, video_path, threshold=threshold, fps=fps)
+
+    return ep_idx, "ok"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize advantage distribution and episodes"
@@ -819,6 +869,13 @@ def main():
         type=str,
         default=None,
         help="Advantage tag: loads meta/advantages_{tag}.parquet and reads threshold from mixture_config.yaml tags.{tag}",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Number of parallel worker processes for episode rendering "
+        "(0=auto: min(8, cpu_count), 1=serial).",
     )
 
     args = parser.parse_args()
@@ -926,27 +983,40 @@ def main():
         f"\nProcessing {len(episode_indices)} episodes: {episode_indices[:10]}{'...' if len(episode_indices) > 10 else ''}"
     )
 
-    for ep_idx in tqdm(episode_indices, desc="Processing episodes"):
-        ep_data = get_episode_data(
-            dataset=dataset,
-            episode_index=ep_idx,
-            tasks=tasks,
-            image_keys=image_keys,
-            adv_df=adv_df,
+    workers = args.workers
+    if workers == 0:
+        workers = min(8, os.cpu_count() or 1, len(episode_indices))
+    workers = max(1, workers)
+
+    jobs = [
+        (
+            ep_idx,
+            str(dataset_path),
+            image_keys,
+            str(adv_parquet),
+            str(output_dir),
+            threshold,
+            args.fps,
+            not args.no_video,
         )
+        for ep_idx in episode_indices
+    ]
 
-        if ep_data is None:
-            print(f"No data found for episode {ep_idx}")
-            continue
-
-        # Create summary plot
-        plot_path = output_dir / f"episode_{ep_idx:04d}_summary.png"
-        create_episode_summary_plot(ep_data, plot_path, threshold=threshold)
-
-        # Create video
-        if not args.no_video:
-            video_path = output_dir / f"episode_{ep_idx:04d}.mp4"
-            create_episode_video(ep_data, video_path, threshold=threshold, fps=args.fps)
+    if workers == 1:
+        for job in tqdm(jobs, desc="Processing episodes"):
+            _process_one_episode(job)
+    else:
+        print(f"Rendering {len(jobs)} episodes with {workers} parallel workers...")
+        # spawn (not fork): forking then calling ffmpeg/pyav in the child
+        # corrupts ffmpeg's global state and segfaults the worker.
+        ctx = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as ex:
+            for _ in tqdm(
+                ex.map(_process_one_episode, jobs),
+                total=len(jobs),
+                desc="Processing episodes",
+            ):
+                pass
 
     print(f"\nVisualization complete! Output saved to {output_dir}")
 

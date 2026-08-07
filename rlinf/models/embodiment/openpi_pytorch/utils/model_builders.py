@@ -21,6 +21,7 @@ builders here, each of which wraps the core in the concrete variant:
 * :func:`_build_eval_model` → :class:`OpenPiPytorchEvalActionModel`
 * :func:`_build_sft_model`  → :class:`OpenPiPytorchSFTActionModel`
 * :func:`_build_rl_model`   → :class:`OpenPiPytorchRLActionModel`
+* :func:`_build_cfg_model`  → :class:`OpenPiPytorchCFGActionModel`
 
 The eval / RL builders assemble the shared ``openpi.transforms`` pipeline via
 :func:`transforms_pipeline.build_openpi_transforms`; the SFT builder holds no
@@ -114,6 +115,37 @@ def _build_sft_model(
         num_steps=num_steps,
         action_env_dim=action_env_dim,
     )
+
+
+def _build_cfg_model(cfg, model_cfg, model, *, num_steps, action_env_dim):
+    """Build the RECAP classifier-free-guidance training variant."""
+    from omegaconf import OmegaConf
+
+    from rlinf.models.embodiment.openpi_pytorch.cfg_action_model import (
+        OpenPiPytorchCFGActionModel,
+    )
+
+    cfg_model = OpenPiPytorchCFGActionModel(
+        model,
+        num_steps=num_steps,
+        action_env_dim=action_env_dim,
+        unconditional_prob=float(
+            OmegaConf.select(model_cfg, "unconditional_prob", default=0.1)
+        ),
+        positive_only_conditional=bool(
+            OmegaConf.select(
+                model_cfg, "positive_only_conditional", default=True
+            )
+        ),
+    )
+    if bool(OmegaConf.select(model_cfg, "train_expert_only", default=False)):
+        frozen = cfg_model.freeze_vlm()
+        logger.info(
+            "openpi_pytorch[cfg]: train_expert_only=True; froze %d VLM "
+            "parameter tensors",
+            frozen,
+        )
+    return cfg_model
 
 
 def _build_rl_model(

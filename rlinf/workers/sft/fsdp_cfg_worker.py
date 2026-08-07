@@ -37,6 +37,8 @@ from rlinf.data.datasets.recap.cfg_model import (
 )
 from rlinf.data.datasets.recap.utils import (
     cast_image_features,
+    load_task_descriptions,
+    validate_lerobot_v3_stack,
 )
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import FSDPModelManager
 from rlinf.scheduler import Cluster, Worker
@@ -171,14 +173,17 @@ class FSDPCfgWorker(FSDPSftWorker):
         for ds_config in datasets_config:
             data_path = ds_config["dataset_path"]
             dataset_root = resolve_lerobot_dataset_root(data_path)
+            is_local_dataset = (dataset_root / "meta" / "info.json").is_file()
+            repo_id = dataset_root.name if is_local_dataset else data_path
+            validate_lerobot_v3_stack(dataset_root)
             episodes = ds_config.get("episodes")
             weight = ds_config.get("weight", 1.0)
 
             dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(
-                data_path, root=dataset_root
+                repo_id, root=dataset_root
             )
             base_dataset = lerobot_dataset.LeRobotDataset(
-                data_path,
+                repo_id,
                 root=dataset_root,
                 episodes=episodes,
                 delta_timestamps={
@@ -195,9 +200,12 @@ class FSDPCfgWorker(FSDPSftWorker):
                 self._fix_episode_data_index(base_dataset, episodes)
 
             if data_config.prompt_from_task:
+                # lerobot >= 0.4 (v3): dataset_meta.tasks is a DataFrame, but
+                # openpi's PromptFromLeRobotTask expects dict[int, str].
+                tasks = load_task_descriptions(dataset_root)
                 base_dataset = openpi_data_loader.TransformedDataset(
                     base_dataset,
-                    [transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
+                    [transforms.PromptFromLeRobotTask(tasks)],
                 )
 
             # RepackTransform strips all keys except OpenPI required ones,
@@ -251,7 +259,18 @@ class FSDPCfgWorker(FSDPSftWorker):
             combined_dataset, config, openpi_data_loader
         )
 
-        data_loader = CFGDataLoaderImpl(data_config, torch_data_loader)
+        if self.cfg.actor.model.model_type == "openpi_pytorch":
+            from rlinf.models.embodiment.openpi_pytorch.cfg_action_model import (
+                CFGObservation as OpenPiPytorchCFGObservation,
+            )
+
+            data_loader = CFGDataLoaderImpl(
+                data_config,
+                torch_data_loader,
+                observation_cls=OpenPiPytorchCFGObservation,
+            )
+        else:
+            data_loader = CFGDataLoaderImpl(data_config, torch_data_loader)
         return data_loader, data_loader.data_config()
 
     def _build_model_transforms(self, data_config: Any) -> list:
@@ -327,6 +346,7 @@ class FSDPCfgWorker(FSDPSftWorker):
         # Use data config overrides if available, otherwise fall back to OpenPI defaults.
         data_cfg = self.cfg.get("data", {})
         num_workers = int(data_cfg.get("num_workers", config.num_workers))
+        prefetch_factor = int(data_cfg.get("prefetch_factor", 4))
         return torch.utils.data.DataLoader(
             dataset,
             batch_size=local_batch_size,
@@ -335,7 +355,7 @@ class FSDPCfgWorker(FSDPSftWorker):
             drop_last=True,
             num_workers=num_workers,
             pin_memory=True,
-            prefetch_factor=4 if num_workers > 0 else None,
+            prefetch_factor=prefetch_factor if num_workers > 0 else None,
             persistent_workers=num_workers > 0,
         )
 

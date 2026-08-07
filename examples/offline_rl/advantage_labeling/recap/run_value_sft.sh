@@ -22,7 +22,9 @@ export FFREPORT=""
 
 export PYTHONPATH="${REPO_PATH}:${LIBERO_REPO_PATH}:$PYTHONPATH"
 
-source switch_env openpi 2>/dev/null || echo "Warning: switch_env not found, using current environment"
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    source switch_env openpi 2>/dev/null || echo "Warning: switch_env not found, using current environment"
+fi
 
 if [ -z "$1" ]; then
     CONFIG_NAME="recap_value_model_sft"

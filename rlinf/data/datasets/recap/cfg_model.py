@@ -133,9 +133,13 @@ class AdvantagePreservingDataset:
 class CFGDataLoaderImpl(BaseDataLoaderImpl):
     """DataLoader wrapper that yields CFG training tuples."""
 
+    def __init__(self, data_config, data_loader, observation_cls=CFGObservation):
+        super().__init__(data_config, data_loader)
+        self._observation_cls = observation_cls
+
     def __iter__(self) -> Iterator[tuple[Any, Any, torch.Tensor]]:
         for batch in self._data_loader:
-            observation = CFGObservation.from_dict(batch)
+            observation = self._observation_cls.from_dict(batch)
             actions = batch["actions"]
 
             advantage = batch["advantage"]

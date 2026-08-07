@@ -16,7 +16,9 @@
 Compute returns for LeRobot datasets.
 
 Writes `return`, `reward`, and `prompt` as a sidecar parquet at
-``meta/returns_{tag}.parquet``. Updates meta/stats.json and meta/info.json.
+``meta/returns_{tag}.parquet``. Updates ``meta/stats.json`` while leaving
+``meta/info.json`` unchanged so LeRobot v3 does not expect sidecar-only
+columns in the episode data parquet files.
 Does not modify original per-episode parquet files.
 
 Return computation:
@@ -44,6 +46,11 @@ from tqdm import tqdm
 
 # Make the rlinf package importable regardless of the cwd the user launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parents[5]))
+
+from rlinf.data.datasets.recap.utils import (
+    load_episode_outcomes,
+    load_task_descriptions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +121,7 @@ def _process_single_parquet(
     gamma: float,
     failure_reward: float,
     tasks: dict[int, str],
+    episode_outcomes: dict[int, bool] | None,
 ) -> pa.Table | None:
     """Process a single parquet file: read only metadata columns, compute returns.
 
@@ -148,23 +156,31 @@ def _process_single_parquet(
     is_success_col = None
     if "is_success" in col_names:
         is_success_col = table.column("is_success").to_pylist()
-    elif dataset_type != "sft":
+    elif dataset_type != "sft" and episode_outcomes is None:
         raise ValueError(
             f"Column 'is_success' not found in {pq_file}. "
-            f"Non-SFT datasets (dataset_type={dataset_type!r}) require 'is_success' "
-            "to correctly distinguish successful and failed episodes."
+            f"Non-SFT datasets (dataset_type={dataset_type!r}) require either "
+            "a per-frame 'is_success' column or meta/episode_outcomes.parquet."
         )
 
     returns_arr = np.empty(n, dtype=np.float32)
     rewards_arr = np.empty(n, dtype=np.float32)
 
-    for _, ep_start, ep_end in episodes:
+    for episode_index, ep_start, ep_end in episodes:
         ep_length = ep_end - ep_start
 
-        if dataset_type == "sft":
+        if episode_outcomes is not None and episode_index in episode_outcomes:
+            is_success = episode_outcomes[episode_index]
+        elif dataset_type == "sft":
             is_success = True
-        else:
+        elif is_success_col is not None:
             is_success = bool(is_success_col[ep_end - 1])
+        else:
+            raise ValueError(
+                f"Episode {episode_index} in {pq_file} has no success label. "
+                "Add it to meta/episode_outcomes.parquet with "
+                "toolkits/so101/label_episode_outcomes.py."
+            )
 
         ep_returns, ep_rewards = compute_returns_for_episode(
             episode_length=ep_length,
@@ -243,15 +259,8 @@ def process_dataset(
     parquet_files = sorted(str(p) for p in data_dir.rglob("*.parquet"))
     logger.info(f"Found {len(parquet_files)} parquet files")
 
-    tasks: dict[int, str] = {}
-    tasks_path = output_path / "meta" / "tasks.jsonl"
-    if tasks_path.exists():
-        with open(tasks_path, "r") as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                task_idx = entry.get("task_index", len(tasks))
-                task_desc = entry.get("task", "")
-                tasks[task_idx] = task_desc
+    tasks = load_task_descriptions(output_path)
+    episode_outcomes = load_episode_outcomes(output_path)
 
     # PyArrow releases GIL during I/O, so threads achieve true parallelism
     result_tables: list[pa.Table] = []
@@ -260,7 +269,12 @@ def process_dataset(
     if effective_workers <= 1:
         for pq_file in tqdm(parquet_files, desc="Processing parquet files"):
             tbl = _process_single_parquet(
-                pq_file, dataset_type, gamma, failure_reward, tasks
+                pq_file,
+                dataset_type,
+                gamma,
+                failure_reward,
+                tasks,
+                episode_outcomes,
             )
             if tbl is not None:
                 result_tables.append(tbl)
@@ -276,6 +290,7 @@ def process_dataset(
                     gamma,
                     failure_reward,
                     tasks,
+                    episode_outcomes,
                 )
                 futures[fut] = pq_file
 
@@ -354,31 +369,6 @@ def process_dataset(
     with open(stats_path, "w") as f:
         json.dump(existing_stats, f, indent=2)
     logger.info("Updated stats.json")
-
-    info_path = output_path / "meta" / "info.json"
-    if info_path.exists():
-        with open(info_path, "r") as f:
-            info = json.load(f)
-
-        info["features"]["return"] = {
-            "dtype": "float32",
-            "shape": [1],
-            "names": None,
-        }
-        info["features"]["reward"] = {
-            "dtype": "float32",
-            "shape": [1],
-            "names": None,
-        }
-        info["features"]["prompt"] = {
-            "dtype": "string",
-            "shape": [1],
-            "names": None,
-        }
-
-        with open(info_path, "w") as f:
-            json.dump(info, f, indent=2)
-        logger.info("Updated info.json with new features")
 
     return stats
 

@@ -12,12 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: E402  # FlashAttention probe must run before Transformers imports.
+
 import logging
 from typing import Any
 
 import torch
 from omegaconf import DictConfig
 from torch.utils.data import Dataset
+
+from rlinf.utils.flash_attn_compat import disable_broken_flash_attn
+
+disable_broken_flash_attn()
+
 from transformers import AutoTokenizer
 
 from rlinf.data.datasets.item import DatasetItem

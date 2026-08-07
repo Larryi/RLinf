@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import io
 import json
 import logging
@@ -30,6 +31,29 @@ except ModuleNotFoundError:  # lerobot < 0.2
 from PIL import Image as PILImage
 
 logger = logging.getLogger(__name__)
+
+
+def validate_lerobot_v3_stack(dataset_path: str | Path) -> None:
+    """Fail early with an actionable message for an incompatible v3 stack."""
+    info_path = Path(dataset_path) / "meta" / "info.json"
+    if not info_path.exists():
+        return
+    with open(info_path, "r") as f:
+        codebase_version = str(json.load(f).get("codebase_version", ""))
+    if not codebase_version.startswith("v3"):
+        return
+
+    from packaging.version import Version
+
+    datasets_version = Version(importlib.metadata.version("datasets"))
+    if datasets_version < Version("4.0.0"):
+        raise RuntimeError(
+            f"LeRobot {codebase_version} dataset at {dataset_path} requires "
+            f"datasets>=4.0, but {datasets_version} is installed. Recreate or "
+            "repair the dedicated venv with: bash requirements/install.sh "
+            "embodied --model openpi --env maniskill_libero --lerobot-v3 "
+            "--no-flash-attn --venv .venv-openpi-recap"
+        )
 
 
 def cast_image_features(hf_dataset):
@@ -118,6 +142,53 @@ def load_returns_sidecar(
     return sidecar
 
 
+def load_episode_outcomes(dataset_path: str | Path) -> dict[int, bool] | None:
+    """Load optional episode-level success labels for rollout datasets.
+
+    When the recorder's ``outcome`` column is present, only ``success`` is a
+    successful terminal state. Both ``timeout`` and ``failure`` are failures.
+    A conflicting ``is_success`` value is rejected instead of silently
+    assigning an incorrect terminal reward.
+    """
+    import pyarrow.parquet as pq
+
+    path = Path(dataset_path) / "meta" / "episode_outcomes.parquet"
+    if not path.exists():
+        return None
+    schema_names = set(pq.ParquetFile(path).schema_arrow.names)
+    required = {"episode_index", "is_success"}
+    if not required.issubset(schema_names):
+        raise ValueError(f"{path} must contain columns {sorted(required)}")
+    columns = ["episode_index", "is_success"]
+    if "outcome" in schema_names:
+        columns.append("outcome")
+    table = pq.read_table(path, columns=columns)
+    episodes = table.column("episode_index").to_numpy()
+    successes = table.column("is_success").to_numpy()
+    if len(np.unique(episodes)) != len(episodes):
+        raise ValueError(f"Duplicate episode_index values in {path}")
+    if "outcome" in table.column_names:
+        labels = [str(value).strip().lower() for value in table["outcome"].to_pylist()]
+        allowed = {"success", "timeout", "failure"}
+        unknown = sorted(set(labels) - allowed)
+        if unknown:
+            raise ValueError(f"Unsupported outcome labels in {path}: {unknown}")
+        expected = np.asarray([label == "success" for label in labels])
+        inconsistent = np.flatnonzero(expected != successes.astype(bool))
+        if inconsistent.size:
+            bad_episodes = [int(episodes[index]) for index in inconsistent[:10]]
+            raise ValueError(
+                f"Conflicting outcome/is_success labels in {path}; "
+                f"episodes={bad_episodes}. timeout and failure must be false."
+            )
+        successes = expected
+    outcomes = {
+        int(episode): bool(success) for episode, success in zip(episodes, successes)
+    }
+    logger.info("Loaded episode outcomes: %s (%d episodes)", path, len(outcomes))
+    return outcomes
+
+
 def load_task_descriptions(dataset_path: str | Path) -> dict[int, str]:
     """Load task descriptions from ``meta/tasks.jsonl`` or ``meta/tasks.parquet``."""
     meta = Path(dataset_path) / "meta"
@@ -138,5 +209,11 @@ def load_task_descriptions(dataset_path: str | Path) -> dict[int, str]:
         df = pd.read_parquet(parquet)
         if "task_index" in df.columns and "task" in df.columns:
             return {int(r["task_index"]): str(r["task"]) for _, r in df.iterrows()}
+        # LeRobot v3 stores task strings in the parquet index.
+        if "task_index" in df.columns and not isinstance(df.index, pd.RangeIndex):
+            return {
+                int(task_index): str(task)
+                for task, task_index in zip(df.index, df["task_index"])
+            }
 
     return {}

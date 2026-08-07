@@ -17,7 +17,10 @@ from __future__ import annotations
 from typing import Any
 
 from rlinf.config import torch_dtype_from_precision
+from rlinf.models.embodiment.openpi_pytorch.compat import disable_broken_flash_attn
 from rlinf.utils.logging import get_logger
+
+disable_broken_flash_attn()
 
 logger = get_logger()
 
@@ -38,6 +41,7 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
     from rlinf.models.embodiment.openpi_pytorch.pi0_model import gemma as pi0_gemma
     from rlinf.models.embodiment.openpi_pytorch.pi0_model.pi0_config import Pi0Config
     from rlinf.models.embodiment.openpi_pytorch.utils.model_builders import (
+        _build_cfg_model,
         _build_eval_model,
         _build_rl_model,
         _build_sft_model,
@@ -88,8 +92,8 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
     task = OmegaConf.select(model_cfg, "task", default=None)
     if task is None:
         raise ValueError(
-            "actor.model.openpi.task is required: set it to 'sft', 'rl', or "
-            "'eval' to pick the concrete OpenPI PyTorch model variant."
+            "actor.model.openpi.task is required: set it to 'sft', 'cfg', "
+            "'rl', or 'eval' to pick the concrete OpenPI PyTorch model variant."
         )
     task = str(task).lower()
 
@@ -121,6 +125,15 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
             action_env_dim=action_env_dim,
         )
 
+    if task == "cfg":
+        return _build_cfg_model(
+            cfg,
+            model_cfg,
+            model,
+            num_steps=num_steps,
+            action_env_dim=action_env_dim,
+        )
+
     if task == "rl":
         paligemma_width = pi0_gemma.get_config(pi0_config.paligemma_variant).width
         return _build_rl_model(
@@ -135,5 +148,5 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
 
     raise ValueError(
         f"actor.model.openpi.task={task!r} is not supported; "
-        "use 'eval', 'sft', or 'rl'."
+        "use 'eval', 'sft', 'cfg', or 'rl'."
     )
