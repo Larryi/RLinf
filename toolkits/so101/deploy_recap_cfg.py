@@ -148,7 +148,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    task = args.task or "pick up the blue pen and place it in the marker"
+    task = args.task or "Grab the blue pen and place it into the black box"
     step_dt = 1.0 / args.frequency
     episode = 0
     try:
