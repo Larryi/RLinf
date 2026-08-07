@@ -20,7 +20,7 @@ Usage::
     PYTHONPATH=/home/larry/RLinf .venv-openpi-recap-v3/bin/python \\
         toolkits/so101/deploy_recap_cfg.py \\
         --checkpoint <sft2new 输出目录> \\
-        --port /dev/ttyUSB0
+        --port /dev/ttyACM0
 
 Loop: ``get_observation()`` -> ``predict_action_batch()`` -> execute the
 action chunk on the arm at ``--frequency``. The model's ``STATE_ACTION_NAMES``
@@ -86,11 +86,13 @@ def main() -> None:
     parser.add_argument("--num-steps", type=int, default=10, help="sampling steps per inference")
     parser.add_argument("--chunk", type=int, default=50, help="action steps executed per inference")
     parser.add_argument("--frequency", type=float, default=20.0, help="action execution rate in Hz")
-    parser.add_argument("--front-camera", default="/dev/video0")
-    parser.add_argument("--wrist-camera", default="/dev/video1")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--front-camera", type=int, default=0, help="front camera device index")
+    parser.add_argument("--wrist-camera", type=int, default=2, help="wrist camera device index")
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--front-fourcc", default="", help="e.g. YUYV; empty = auto-detect")
+    parser.add_argument("--wrist-fourcc", default="YUYV", help="e.g. YUYV; empty = auto-detect")
     parser.add_argument("--no-cameras", action="store_true", help="debug: state-only, no images")
     parser.add_argument("--use-radians", action="store_true",
                         help="default False: SO-101 data is in degrees")
@@ -114,10 +116,12 @@ def main() -> None:
         from lerobot.cameras.opencv import OpenCVCameraConfig
 
         cameras["front"] = OpenCVCameraConfig(
-            index_or_path=args.front_camera, fps=args.fps, width=args.width, height=args.height
+            index_or_path=args.front_camera, fps=args.fps, width=args.width, height=args.height,
+            fourcc=args.front_fourcc or None,
         )
         cameras["wrist"] = OpenCVCameraConfig(
-            index_or_path=args.wrist_camera, fps=args.fps, width=args.width, height=args.height
+            index_or_path=args.wrist_camera, fps=args.fps, width=args.width, height=args.height,
+            fourcc=args.wrist_fourcc or None,
         )
 
     # --- robot ---
