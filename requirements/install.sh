@@ -1553,6 +1553,14 @@ install_openpi_model() {
             uv pip install "rlinf-openpi==0.1.1"
             install_flash_attn
             ;;
+        dummy)
+            # No environment assets (libero/maniskill) are needed for offline
+            # RL / SFT training on recorded datasets (e.g. RECAP CFG).
+            create_and_sync_venv
+            install_common_embodied_deps
+            uv pip install "rlinf-openpi==0.1.1"
+            install_flash_attn
+            ;;
         metaworld)
             create_and_sync_venv
             install_common_embodied_deps

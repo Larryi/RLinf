@@ -29,6 +29,10 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${HF_DOWNLOAD_WORKERS:=16}"
 : "${CHECKPOINT_UPLOAD_INTERVAL:=300}"
 : "${FAST_MODE:=1}"
+# RECAP trains offline on recorded datasets, so no simulator environment is
+# needed: use the lightweight "dummy" env (skips libero/maniskill asset
+# downloads). Switch to "maniskill_libero" only if rollout/RL envs are needed.
+: "${INSTALL_ENV:=dummy}"
 : "${RESUME_RUN_ID:=}"
 
 IFS=',' read -r -a gpu_ids <<<"${GPU_IDS}"
@@ -205,7 +209,7 @@ set_phase "prepare environment"
 if [[ "${PREPARE_ENV}" == "1" && ! -x "${VENV_DIR}/bin/python" ]]; then
   python3 -m pip install --upgrade uv huggingface_hub
   bash "${ROOT}/requirements/install.sh" embodied \
-    --model openpi --env maniskill_libero --lerobot-v3 \
+    --model openpi --env "${INSTALL_ENV}" --lerobot-v3 \
     --no-flash-attn --no-root --venv "${VENV_DIR}"
 fi
 [[ -x "${VENV_DIR}/bin/python" ]] || { echo "Missing venv: ${VENV_DIR}" >&2; exit 4; }
@@ -274,7 +278,6 @@ if has_stage returns; then
   upload_dataset_meta "${ROLLOUT_DATASET_REPO}" "${ROLLOUT_ROOT}"
 fi
 
-mixture="[{dataset_path:${SFT_ROOT},type:sft,weight:1.0,robot_type:so101,model_type:pi05},{dataset_path:${ROLLOUT_ROOT},type:rollout,weight:1.0,robot_type:so101,model_type:pi05}]"
 sharding="no_shard"
 [[ "${GPU_COUNT}" == "1" ]] || sharding="full_shard"
 if has_stage value; then
@@ -282,7 +285,6 @@ if has_stage value; then
   value_args=(
     --config-path "${ROOT}/examples/offline_rl/config"
     --config-name recap_so101_value_model_sft
-    "data.train_data_paths=${mixture}"
     "runner.logger.log_path=${VALUE_ROOT}"
     "runner.max_steps=${VALUE_MAX_STEPS}"
     "runner.save_interval=${VALUE_SAVE_INTERVAL}"
@@ -321,7 +323,6 @@ if has_stage advantages; then
   export RECAP_VALUE_CHECKPOINT="${VALUE_CHECKPOINT_DIR}"
   bash "${ROOT}/examples/offline_rl/advantage_labeling/recap/process/run_compute_advantages.sh" \
     recap_so101_compute_advantages --nproc "${GPU_COUNT}" \
-    "data.train_data_paths=${mixture}" \
     "advantage.value_checkpoint=${VALUE_CHECKPOINT_DIR}" \
     "advantage.model.siglip_path=${SIGLIP_ROOT}" \
     "advantage.model.gemma3_path=${GEMMA_ROOT}" \
@@ -335,7 +336,6 @@ if has_stage cfg; then
   cfg_args=(
     --config-path "${ROOT}/examples/offline_rl/config"
     --config-name cfg_rl_openpi_pytorch_so101
-    "data.train_data_paths=${mixture}"
     "runner.logger.log_path=${CFG_ROOT}"
     "runner.max_steps=${CFG_MAX_STEPS}"
     "runner.save_interval=${CFG_SAVE_INTERVAL}"

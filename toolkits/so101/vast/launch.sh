@@ -23,6 +23,9 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${SOURCE_MODE:=git}"
 : "${GIT_REPO:=}"
 : "${GIT_BRANCH:=so101-recap}"
+# START_PIPELINE=0: only deploy code + recap.env, do not start training
+# (ssh in and run toolkits/so101/vast/remote_start.sh when you are ready).
+: "${START_PIPELINE:=1}"
 [[ -f "${VAST_ENV_FILE}" ]] || { echo "Missing ${VAST_ENV_FILE}" >&2; exit 2; }
 mode="$(stat -c '%a' "${VAST_ENV_FILE}")"
 [[ "${mode}" == "600" || "${mode}" == "400" ]] || {
@@ -31,7 +34,7 @@ mode="$(stat -c '%a' "${VAST_ENV_FILE}")"
 }
 remote="${VAST_SSH_USER}@${VAST_SSH_HOST}"
 ssh_args=(-p "${VAST_SSH_PORT}" -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
-ssh "${ssh_args[@]}" "${remote}" "mkdir -p '${REMOTE_ROOT}/.secrets' '${REMOTE_ROOT}/logs'"
+ssh "${ssh_args[@]}" "${remote}" "mkdir -p '${REMOTE_ROOT}'"
 
 if [[ "${SOURCE_MODE}" == "git" ]]; then
   : "${GIT_REPO:?Set GIT_REPO when SOURCE_MODE=git}"
@@ -43,10 +46,11 @@ set -euo pipefail
 if [[ -d "${REMOTE_ROOT}/.git" ]]; then
   git -C "${REMOTE_ROOT}" fetch origin "${GIT_BRANCH}"
   git -C "${REMOTE_ROOT}" reset --hard "origin/${GIT_BRANCH}"
-elif [[ -d "${REMOTE_ROOT}" && -n "$(ls -A "${REMOTE_ROOT}")" ]]; then
-  find "${REMOTE_ROOT}" -mindepth 1 -maxdepth 1 ! -name .secrets -exec rm -rf {} +
-  git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO}" "${REMOTE_ROOT}"
 else
+  # Any leftover files (previous rsync/aborted run) make git clone refuse the
+  # directory, so wipe it and clone fresh. .secrets is recreated below and the
+  # env file is re-scp'd on every launch, so nothing of value is lost.
+  rm -rf "${REMOTE_ROOT}"
   git clone --depth 1 --branch "${GIT_BRANCH}" "${GIT_REPO}" "${REMOTE_ROOT}"
 fi
 REMOTE
@@ -58,13 +62,20 @@ else
     "${ROOT}/" "${remote}:${REMOTE_ROOT}/"
 fi
 
+ssh "${ssh_args[@]}" "${remote}" "mkdir -p '${REMOTE_ROOT}/.secrets' '${REMOTE_ROOT}/logs'"
 scp -P "${VAST_SSH_PORT}" "${VAST_ENV_FILE}" "${remote}:${REMOTE_ROOT}/.secrets/recap.env"
 ssh "${ssh_args[@]}" "${remote}" "chmod 600 '${REMOTE_ROOT}/.secrets/recap.env'"
 command="cd '${REMOTE_ROOT}' && set -a && source .secrets/recap.env && set +a"
-if [[ "${DETACH}" == "1" ]]; then
-  ssh "${ssh_args[@]}" "${remote}" \
-    "${command} && nohup bash toolkits/so101/vast/run_recap_pipeline.sh >>logs/recap-launcher.log 2>&1 </dev/null & echo \$!"
+if [[ "${START_PIPELINE}" == "1" ]]; then
+  if [[ "${DETACH}" == "1" ]]; then
+    ssh "${ssh_args[@]}" "${remote}" \
+      "${command} && nohup bash toolkits/so101/vast/run_recap_pipeline.sh >>logs/recap-launcher.log 2>&1 </dev/null & echo \$!"
+  else
+    ssh -t "${ssh_args[@]}" "${remote}" \
+      "${command} && exec bash toolkits/so101/vast/run_recap_pipeline.sh"
+  fi
 else
-  ssh -t "${ssh_args[@]}" "${remote}" \
-    "${command} && exec bash toolkits/so101/vast/run_recap_pipeline.sh"
+  echo "[skip] pipeline not started (START_PIPELINE=0). To start it on the instance:"
+  echo "  ssh root@${VAST_SSH_HOST} -p ${VAST_SSH_PORT}"
+  echo "  bash ${REMOTE_ROOT}/toolkits/so101/vast/remote_start.sh"
 fi

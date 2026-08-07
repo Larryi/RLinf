@@ -8,7 +8,8 @@
 | 脚本 | 作用 |
 |------|------|
 | `upload_assets.sh` | **一次性**：把本地已标注数据集 ×2、PyTorch 基模、可选 value checkpoint 上传到 HF（云端 `hf download` 的源头） |
-| `launch.sh` | 本机执行：把代码送到云端（默认 git clone 你的 fork，备选 rsync）→ 注入 secrets → 云端后台跑管道 |
+| `launch.sh` | 本机执行：把代码送到云端（默认 git clone 你的 fork，备选 rsync）→ 注入 secrets → 启动管道（`START_PIPELINE=0` 则只部署不启动） |
+| `remote_start.sh` | **云端执行**：`ssh` 上去后一键启动训练（source recap.env + nohup 跑管道） |
 | `run_recap_pipeline.sh` | 云端执行：装 venv → 下载物料 → 按 `RECAP_STAGES` 逐阶段训练 → Serverchan 推送 → 产物上传 HF → 自动停实例 |
 | `status.sh` | 本机执行：查云端 status.json + 日志 + GPU 占用 |
 
@@ -96,11 +97,20 @@ export VALUE_CHECKPOINT_REPO="<owner/value-checkpoint-repo>"   # upload_assets.s
 
 ## 启动与监控
 
+方式一（自动）：本机 `launch.sh` 部署代码+env 并直接后台启动。
+方式二（手动控制）：本机只部署、云端再启动：
+
 ```bash
-export VAST_SSH_HOST=... VAST_SSH_PORT=... VAST_ENV_FILE=/path/to/recap.env
-bash toolkits/so101/vast/launch.sh        # 推代码 + 后台跑管道
-bash toolkits/so101/vast/status.sh        # 随时查进度（status.json + 日志 + GPU）
+# 本机：只部署代码 + recap.env，不启动
+START_PIPELINE=0 bash toolkits/so101/vast/launch.sh
+
+# 然后 ssh 到云端，随时手动启动训练
+ssh root@<host> -p <port>
+bash /workspace/RLinf/toolkits/so101/vast/remote_start.sh
+# 日志 tail -f /workspace/RLinf/logs/recap-launcher.log
 ```
+
+状态查询：`bash toolkits/so101/vast/status.sh`（status.json + 日志 + GPU）。
 
 训练产物（value/cfg checkpoint、tensorboard 等）会随阶段完成自动上传到 `OUTPUT_MODEL_REPO`，训练中每 `CHECKPOINT_UPLOAD_INTERVAL` 秒增量同步新 `global_step_*`；成功/失败均 Serverchan 推送；默认完成后自动停实例（`AUTO_STOP_INSTANCE=1`）。
 
@@ -129,5 +139,6 @@ export RESUME_RUN_ID="so101_recap_<之前的RUN_ID>"
 ## 备注
 
 - 云端代码默认来自你的 GitHub fork（git 模式），**代码不进 recap.env、不依赖本机在线**；rsync 模式会带全部未提交改动，适合本地魔改还没推 GitHub 时。
+- **`INSTALL_ENV=dummy`（默认）**：RECAP 是 offline RL/SFT，`install.sh` 不再安装 libero/maniskill（跳过 `libero-download-assets` 与 maniskill assets 下载，装 venv 快很多）；需要真实环境交互时才改回 `maniskill_libero`。openpi tokenizer（几 MB）仍会自动下载。
 - siglip2 / gemma-3 由管道自动从 HF 下载（`google/siglip2-so400m-patch14-224`、`google/gemma-3-270m`）。
 - 本机根文件系统只读的问题在云端不存在（磁盘可写），无需 `LIBERO_CONFIG_PATH` hack。
