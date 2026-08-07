@@ -223,6 +223,10 @@ fi
 [[ -x "${VENV_DIR}/bin/python" ]] || { echo "Missing venv: ${VENV_DIR}" >&2; exit 4; }
 source "${VENV_DIR}/bin/activate"
 export REPO_PATH="${ROOT}"
+# install.sh builds the venv with --no-install-project, so `import rlinf`
+# works only when the repo root is on PYTHONPATH (run_compute_advantages.sh
+# does this itself; plain `python train_cfg.py` needs it set here).
+export PYTHONPATH="${ROOT}:${PYTHONPATH:-}"
 export HF_HOME="${WORK_ROOT}/cache/huggingface"
 export HF_DATASETS_CACHE="${WORK_ROOT}/cache/datasets"
 export TRANSFORMERS_CACHE="${WORK_ROOT}/cache/transformers"
