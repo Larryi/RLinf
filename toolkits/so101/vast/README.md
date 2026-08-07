@@ -112,7 +112,7 @@ bash /workspace/RLinf/toolkits/so101/vast/remote_start.sh
 
 状态查询：`bash toolkits/so101/vast/status.sh`（status.json + 日志 + GPU）。
 
-训练产物（value/cfg checkpoint、tensorboard 等）会随阶段完成自动上传到 `OUTPUT_MODEL_REPO`，训练中每 `CHECKPOINT_UPLOAD_INTERVAL` 秒增量同步新 `global_step_*`；成功/失败均 Serverchan 推送；默认完成后自动停实例（`AUTO_STOP_INSTANCE=1`）。
+训练产物（value/cfg checkpoint、tensorboard 等）在**每个阶段完成时**自动上传到 `OUTPUT_MODEL_REPO`（`UPLOAD_CHECKPOINTS=0` 默认，训练中不增量上传）；训练中**只保留最新 1 个 checkpoint**（`PRUNE_CHECKPOINTS=1` / `KEEP_CHECKPOINTS=1`，3.35B 的 CFG checkpoint 约 7G/个，不清理会爆盘）；成功/失败均 Serverchan 推送；默认完成后自动停实例（`AUTO_STOP_INSTANCE=1`）。
 
 ## 断点续训
 

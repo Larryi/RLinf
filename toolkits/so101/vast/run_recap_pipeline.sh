@@ -36,6 +36,15 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${TRAIN_EXPERT_ONLY:=1}"
 : "${HF_DOWNLOAD_WORKERS:=16}"
 : "${CHECKPOINT_UPLOAD_INTERVAL:=300}"
+# Upload policy: 0 (default) uploads only the final run artifacts when each
+# stage finishes; 1 restores the old behavior of syncing every new checkpoint
+# to HF during training (many 7 GB CFG checkpoints can fill the disk).
+: "${UPLOAD_CHECKPOINTS:=0}"
+# Keep only the newest KEEP_CHECKPOINTS checkpoint(s) on disk while training;
+# older ones are pruned so the disk does not fill up.
+: "${PRUNE_CHECKPOINTS:=1}"
+: "${KEEP_CHECKPOINTS:=1}"
+: "${PRUNE_INTERVAL:=60}"
 : "${FAST_MODE:=1}"
 # RECAP trains offline on recorded datasets, so no simulator environment is
 # needed: use the lightweight "dummy" env (skips libero/maniskill asset
@@ -70,6 +79,7 @@ exec > >(tee -a "${LOG_DIR}/pipeline.log") 2>&1
 PHASE="bootstrap"
 UPLOAD_STATUS="not_started"
 CHECKPOINT_SYNC_PID=""
+PRUNE_PID=""
 
 write_status() {
   local state="$1"
@@ -138,6 +148,7 @@ on_exit() {
   trap - EXIT
   set +e
   [[ -z "${CHECKPOINT_SYNC_PID}" ]] || kill "${CHECKPOINT_SYNC_PID}" 2>/dev/null
+  [[ -z "${PRUNE_PID}" ]] || kill "${PRUNE_PID}" 2>/dev/null
   if (( rc == 0 )); then
     PHASE="complete"
     write_status success
@@ -207,6 +218,28 @@ stop_checkpoint_sync() {
   [[ -z "${CHECKPOINT_SYNC_PID}" ]] || kill "${CHECKPOINT_SYNC_PID}" 2>/dev/null || true
   [[ -z "${CHECKPOINT_SYNC_PID}" ]] || wait "${CHECKPOINT_SYNC_PID}" 2>/dev/null || true
   CHECKPOINT_SYNC_PID=""
+}
+
+prune_checkpoints() {
+  local training_root="$1" keep="${KEEP_CHECKPOINTS}"
+  (
+    while true; do
+      find "${training_root}" -type d -name 'global_step_*' 2>/dev/null \
+        | sort -V | head -n -"${keep}" \
+        | while IFS= read -r old; do
+            rm -rf "${old}"
+            echo "[prune] removed ${old}"
+          done
+      sleep "${PRUNE_INTERVAL}"
+    done
+  ) &
+  PRUNE_PID=$!
+}
+
+stop_prune() {
+  [[ -z "${PRUNE_PID}" ]] || kill "${PRUNE_PID}" 2>/dev/null || true
+  [[ -z "${PRUNE_PID}" ]] || wait "${PRUNE_PID}" 2>/dev/null || true
+  PRUNE_PID=""
 }
 
 stop_ray() {
@@ -312,10 +345,16 @@ if has_stage value; then
     value_resume="$(find "${RESUME_ROOT}" -type d -name 'global_step_*' | grep '/value/' | sort -V | tail -1 || true)"
     [[ -z "${value_resume}" ]] || value_args+=("runner.resume_dir=${value_resume}")
   fi
-  start_checkpoint_sync "${VALUE_ROOT}" value
+  if [[ "${UPLOAD_CHECKPOINTS}" == "1" ]]; then
+    start_checkpoint_sync "${VALUE_ROOT}" value
+  fi
+  if [[ "${PRUNE_CHECKPOINTS}" == "1" ]]; then
+    prune_checkpoints "${VALUE_ROOT}"
+  fi
   python "${ROOT}/examples/offline_rl/advantage_labeling/recap/train_value.py" \
     "${value_args[@]}"
   stop_checkpoint_sync
+  stop_prune
   stop_ray
   upload_run
 fi
@@ -372,10 +411,16 @@ if has_stage cfg; then
       "actor.fsdp_config.gradient_checkpointing=false"
     )
   fi
-  start_checkpoint_sync "${CFG_ROOT}" cfg
+  if [[ "${UPLOAD_CHECKPOINTS}" == "1" ]]; then
+    start_checkpoint_sync "${CFG_ROOT}" cfg
+  fi
+  if [[ "${PRUNE_CHECKPOINTS}" == "1" ]]; then
+    prune_checkpoints "${CFG_ROOT}"
+  fi
   python "${ROOT}/examples/offline_rl/policy_optimization/cfg_rl/train_cfg.py" \
     "${cfg_args[@]}"
   stop_checkpoint_sync
+  stop_prune
   stop_ray
   upload_run
 fi
