@@ -2,6 +2,12 @@
 set -Eeuo pipefail
 umask 077
 
+# DataLoader workers exchange image tensors via torch shared memory (one FD per
+# tensor); containers with a low ulimit -n (e.g. 1024) hit EMFILE "Too many
+# open files" in torch.multiprocessing. Raise it; lower ADV_WORKERS if the
+# container's hard limit is too low.
+ulimit -n 65535 2>/dev/null || true
+
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${HF_TOKEN:?Set HF_TOKEN}"
 : "${SFT_DATASET_REPO:?Set SFT_DATASET_REPO}"
@@ -21,6 +27,8 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${VALUE_GLOBAL_BATCH:=32}"
 : "${VALUE_MAX_STEPS:=8000}"
 : "${VALUE_SAVE_INTERVAL:=500}"
+: "${ADV_WORKERS:=2}"
+: "${ADV_PREFETCH:=2}"
 : "${CFG_MICRO_BATCH:=1}"
 : "${CFG_GLOBAL_BATCH:=8}"
 : "${CFG_MAX_STEPS:=3000}"
@@ -324,6 +332,8 @@ if has_stage advantages; then
   bash "${ROOT}/examples/offline_rl/advantage_labeling/recap/process/run_compute_advantages.sh" \
     recap_so101_compute_advantages --nproc "${GPU_COUNT}" \
     "advantage.value_checkpoint=${VALUE_CHECKPOINT_DIR}" \
+    "advantage.num_dataloader_workers_per_gpu=${ADV_WORKERS}" \
+    "advantage.prefetch_factor=${ADV_PREFETCH}" \
     "advantage.model.siglip_path=${SIGLIP_ROOT}" \
     "advantage.model.gemma3_path=${GEMMA_ROOT}" \
     "advantage.model.tokenizer_path=${GEMMA_ROOT}"
