@@ -101,6 +101,9 @@ def main() -> None:
     parser.add_argument("--max-relative-target", type=float, default=10.0,
                         help="max per-step joint movement in degrees (used with --safety)")
     parser.add_argument("--no-calibrate", action="store_true", help="skip lerobot calibration on connect")
+    parser.add_argument("--calibration-dir", default=None,
+                        help="custom lerobot calibration dir; default = ~/.cache/huggingface/lerobot/calibration "
+                             "(so_follower/so101.json is auto-loaded when id=so101)")
     parser.add_argument("--max-episodes", type=int, default=0, help="stop after N inferences (0 = run forever)")
     args = parser.parse_args()
 
@@ -128,8 +131,10 @@ def main() -> None:
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
     config = SO101FollowerConfig(
+        id="so101",  # matches so_follower/so101.json in the lerobot calibration dir
         port=args.port,
         cameras=cameras,
+        calibration_dir=args.calibration_dir,
         use_degrees=not args.use_radians,
         max_relative_target=args.max_relative_target if args.safety else None,
     )
