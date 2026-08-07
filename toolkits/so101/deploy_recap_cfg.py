@@ -84,9 +84,10 @@ def main() -> None:
     parser.add_argument("--port", default="/dev/ttyUSB0", help="SO-101 MotorBus serial port")
     parser.add_argument("--task", default="", help="task description; defaults to a generic prompt")
     parser.add_argument("--num-steps", type=int, default=10, help="sampling steps per inference")
-    parser.add_argument("--chunk", type=int, default=50, help="action steps executed per inference")
-    parser.add_argument("--frequency", type=float, default=10.0,
-                        help="action execution rate in Hz (10 for STS3215; raise only if the arm keeps up)")
+    parser.add_argument("--execute-steps", type=int, default=20,
+                        help="steps executed per inference cycle; the model always predicts 50 and we re-infer"
+                             " after these. 0 = execute the whole 50-step chunk")
+    parser.add_argument("--frequency", type=float, default=30.0, help="action execution rate in Hz")
     parser.add_argument("--front-camera", type=int, default=0, help="front camera device index")
     parser.add_argument("--wrist-camera", type=int, default=2, help="wrist camera device index")
     parser.add_argument("--width", type=int, default=640)
@@ -157,6 +158,7 @@ def main() -> None:
 
     task = args.task or "Grab the blue pen and place it into the black box"
     step_dt = 1.0 / args.frequency
+    execute = args.execute_steps or 50
     segment = 0
     try:
         while True:
@@ -172,13 +174,11 @@ def main() -> None:
 
             with torch.no_grad():
                 actions, _ = policy.predict_action_batch(env_obs)
-            chunk = actions[0].float().cpu().numpy()[: args.chunk]
+            chunk = actions[0].float().cpu().numpy()  # model always predicts 50 steps
 
-            print(f"[deploy] segment={segment} state={state.tolist()}")
-            probe = sorted({0, args.chunk // 4, args.chunk // 2, 3 * args.chunk // 4, len(chunk) - 1})
-            for t in probe:
-                print(f"  chunk[t={t:2d}]={chunk[t].tolist()}")
-            for t in range(len(chunk)):
+            print(f"[deploy] segment={segment} state={state.tolist()} "
+                  f"pred[0]={chunk[0].tolist()}")
+            for t in range(min(execute, len(chunk))):
                 robot.send_action(
                     {name: float(chunk[t, i]) for i, name in enumerate(STATE_ACTION_NAMES)}
                 )
