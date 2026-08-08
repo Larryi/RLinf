@@ -55,24 +55,47 @@ STATE_ACTION_NAMES = (
 )
 
 
-class RTCInference:
-    """Asynchronous policy inference with a rolling action queue (openpi-style RTC).
 
-    A background thread keeps re-inferring 50-step chunks from the latest
-    observation while the control loop consumes actions at 30 Hz, so inference
-    overlaps execution instead of blocking it.
+
+class RTCInference:
+    """OpenPI-style async RTC with time-aligned chunk splicing.
+
+    Mirrors ``record_pi05_rollouts.py: collect_episode_rtc`` client semantics:
+
+    - a background thread re-infers when ``0 < remaining <= queue_threshold``
+      and no request is in flight;
+    - when a result arrives, the already-executed prefix is dropped and the
+      rest is spliced: ``actions = new_actions[executed_since_request:]`` so
+      the trajectory stays continuous (no restart from step 0);
+    - ``execution_horizon`` is the guidance-prefix length (the next actions
+      the new chunk is smoothed toward when ``max_guidance_weight < 10``);
+    - underrun holds the last target without re-sending and raises
+      :class:`TimeoutError` after ``result_timeout`` seconds.
     """
 
-    def __init__(self, policy, queue_threshold: int = 30, guidance_weight: float = 10.0):
+    def __init__(
+        self,
+        policy,
+        queue_threshold: int = 30,
+        execution_horizon: int = 20,
+        max_guidance_weight: float = 10.0,
+        open_loop_horizon: int = 50,
+        result_timeout: float = 10.0,
+    ):
         self.policy = policy
         self.threshold = queue_threshold
-        # 10 -> follow predictions exactly; lower values smooth toward the
-        # previously executed action.
-        self.guidance = guidance_weight / 10.0
+        self.horizon = execution_horizon
+        self.guidance = max_guidance_weight / 10.0  # 10 -> follow predictions
+        self.olo = open_loop_horizon
+        self.result_timeout = result_timeout
         self._obs = None
         self._obs_lock = threading.Lock()
-        self._actions: collections.deque = collections.deque()
         self._lock = threading.Lock()
+        self._actions: np.ndarray | None = None
+        self._action_index = 0
+        self._inflight = False
+        self._executed_since_request = 0
+        self._underrun_since: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._infer_loop, daemon=True)
 
@@ -86,33 +109,70 @@ class RTCInference:
         with self._obs_lock:
             self._obs = env_obs
 
-    def pop_action(self, last: np.ndarray | None) -> np.ndarray | None:
+    def step(self) -> np.ndarray | None:
+        """One control period. Returns the next action, or None to hold last."""
         with self._lock:
-            if not self._actions:
-                return None
-            raw = np.asarray(self._actions.popleft(), dtype=np.float32)
-        if last is not None and self.guidance < 1.0:
-            return last + self.guidance * (raw - last)
-        return raw
+            if self._actions is not None and self._action_index < len(self._actions):
+                action = self._actions[self._action_index]
+                self._action_index += 1
+                self._executed_since_request += 1
+                self._underrun_since = None
+                return action
+            # underrun: hold the last target, but fail loudly after timeout
+            if self._underrun_since is None:
+                self._underrun_since = time.perf_counter()
+                print("[rtc] queue underrun; holding the last target", flush=True)
+            elif time.perf_counter() - self._underrun_since > self.result_timeout:
+                raise TimeoutError("Timed out waiting for the next RTC action chunk")
+            return None
 
     def _infer_loop(self) -> None:
         while not self._stop.is_set():
             with self._obs_lock:
                 obs = self._obs
             if obs is None:
-                time.sleep(0.01)
+                time.sleep(0.005)
                 continue
             with self._lock:
-                need = len(self._actions) < self.threshold
-            if not need:
-                time.sleep(0.01)
+                remaining = (
+                    0
+                    if self._actions is None
+                    else len(self._actions) - self._action_index
+                )
+                if self._inflight or remaining > self.threshold:
+                    idle = True
+                else:
+                    idle = False
+                    if self._actions is None:
+                        prefix = None
+                    else:
+                        prefix = self._actions[
+                            self._action_index : self._action_index + self.horizon
+                        ]
+                    self._inflight = True
+                    executed_at_request = self._executed_since_request
+            if idle:
+                # never sleep while holding the lock: it stalls the 30 Hz
+                # control loop (step()) which contends for the same lock.
+                time.sleep(0.005)
                 continue
             with torch.no_grad():
                 actions, _ = self.policy.predict_action_batch(obs)
-            chunk = actions[0].float().cpu().numpy()
+            chunk = actions[0].float().cpu().numpy()[: self.olo]
             with self._lock:
-                if len(self._actions) < self.threshold:
-                    self._actions.extend(t for t in chunk)
+                actual_delay = self._executed_since_request - executed_at_request
+                if actual_delay >= len(chunk):
+                    print(f"[rtc] discarding late chunk (delay={actual_delay})", flush=True)
+                    self._actions = None
+                else:
+                    new = chunk[actual_delay:]
+                    # optional splice-point smoothing toward the guidance prefix
+                    if prefix is not None and self.guidance < 1.0 and len(new) >= self.horizon:
+                        n = min(self.horizon, len(prefix))
+                        new[:n] = prefix[:n] + self.guidance * (new[:n] - prefix[:n])
+                    self._actions = new
+                    self._action_index = 0
+                self._inflight = False
 
 
 def build_model_cfg(checkpoint: Path, num_steps: int) -> OmegaConf:
@@ -171,14 +231,18 @@ def main() -> None:
     parser.add_argument("--max-segments", type=int, default=0,
                         help="stop after N inference cycles (0 = run forever)")
     parser.add_argument("--rtc", action="store_true",
-                        help="asynchronous real-time control (openpi-style RTC): a background thread keeps "
-                             "inferring 50-step chunks while the loop executes at --frequency")
+                        help="openpi-style asynchronous RTC: background inference with time-aligned chunk "
+                             "splicing, matching record_pi05_rollouts.py's collect_episode_rtc")
     parser.add_argument("--rtc-queue-threshold", type=int, default=30,
-                        help="re-infer when queued actions fall below this")
+                        help="re-infer when remaining actions fall into (0, threshold]")
     parser.add_argument("--rtc-execution-horizon", type=int, default=20,
-                        help="accepted for openpi parity; scheduling is threshold-driven")
+                        help="guidance-prefix length for splice smoothing")
     parser.add_argument("--rtc-max-guidance-weight", type=float, default=10.0,
-                        help="10 = follow predictions exactly; lower values smooth toward the last executed action")
+                        help="10 = follow new predictions exactly; lower = smooth toward the prefix")
+    parser.add_argument("--rtc-result-timeout", type=float, default=10.0,
+                        help="raise if the action queue underruns longer than this (seconds)")
+    parser.add_argument("--open-loop-horizon", type=int, default=50,
+                        help="steps the model predicts per inference (<= model action_chunk)")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -233,11 +297,18 @@ def main() -> None:
     segment = 0
     rtc = None
     if args.rtc:
-        rtc = RTCInference(policy, args.rtc_queue_threshold, args.rtc_max_guidance_weight)
+        rtc = RTCInference(
+            policy,
+            queue_threshold=args.rtc_queue_threshold,
+            execution_horizon=args.rtc_execution_horizon,
+            max_guidance_weight=args.rtc_max_guidance_weight,
+            open_loop_horizon=args.open_loop_horizon,
+            result_timeout=args.rtc_result_timeout,
+        )
         rtc.start()
-        print(f"[deploy] RTC on (queue_threshold={args.rtc_queue_threshold} "
-              f"guidance={args.rtc_max_guidance_weight})")
-    last_cmd = None
+        print(f"[deploy] RTC on (threshold={args.rtc_queue_threshold} "
+              f"horizon={args.rtc_execution_horizon} guidance={args.rtc_max_guidance_weight} "
+              f"timeout={args.rtc_result_timeout}s)")
     try:
         while True:
             obs = robot.get_observation()
@@ -252,13 +323,12 @@ def main() -> None:
 
             if rtc is not None:
                 rtc.update_observation(env_obs)
-                cmd = rtc.pop_action(last_cmd)
+                cmd = rtc.step()
                 if cmd is not None:
-                    last_cmd = cmd
-                if last_cmd is not None:
                     robot.send_action(
-                        {name: float(last_cmd[i]) for i, name in enumerate(STATE_ACTION_NAMES)}
+                        {name: float(cmd[i]) for i, name in enumerate(STATE_ACTION_NAMES)}
                     )
+                # cmd is None -> underrun: hold the last target (no re-send)
                 time.sleep(step_dt)
             else:
                 with torch.no_grad():
