@@ -142,7 +142,7 @@ def load_returns_sidecar(
     return sidecar
 
 
-def load_episode_outcomes(dataset_path: str | Path) -> dict[int, bool] | None:
+def load_episode_outcome_labels(dataset_path: str | Path) -> dict[int, str] | None:
     """Load optional episode-level success labels for rollout datasets.
 
     When the recorder's ``outcome`` column is present, only ``success`` is a
@@ -182,11 +182,19 @@ def load_episode_outcomes(dataset_path: str | Path) -> dict[int, bool] | None:
                 f"episodes={bad_episodes}. timeout and failure must be false."
             )
         successes = expected
-    outcomes = {
-        int(episode): bool(success) for episode, success in zip(episodes, successes)
-    }
-    logger.info("Loaded episode outcomes: %s (%d episodes)", path, len(outcomes))
+    if "outcome" not in table.column_names:
+        labels = ["success" if bool(success) else "failure" for success in successes]
+    outcomes = {int(episode): label for episode, label in zip(episodes, labels)}
+    logger.info("Loaded episode outcome labels: %s (%d episodes)", path, len(outcomes))
     return outcomes
+
+
+def load_episode_outcomes(dataset_path: str | Path) -> dict[int, bool] | None:
+    """Load optional success flags; timeout and failure both map to ``False``."""
+    labels = load_episode_outcome_labels(dataset_path)
+    if labels is None:
+        return None
+    return {episode: label == "success" for episode, label in labels.items()}
 
 
 def load_task_descriptions(dataset_path: str | Path) -> dict[int, str]:

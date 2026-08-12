@@ -10,7 +10,9 @@ advantage:
   prefetch_factor: 2
   discount_next_value: true
   positive_quantile: 0.3
-  tag: so101_q30
+  # Keep the sidecar name synchronized with CFG through one environment
+  # variable. This prevents a new Value model from overwriting older labels.
+  tag: ${oc.env:SO101_RECAP_ADVANTAGE_TAG,so101_q30}
   returns_tag: so101
   model:
     critic_expert_variant: gemma_1m

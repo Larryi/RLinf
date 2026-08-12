@@ -30,7 +30,7 @@ runner:
 data:
   num_workers: 1
   prefetch_factor: 1
-  advantage_tag: so101_q30
+  advantage_tag: ${oc.env:SO101_RECAP_ADVANTAGE_TAG,so101_q30}
   balance_dataset_weights: true
   seed: 42
   train_data_paths:

@@ -17,7 +17,7 @@
 # (model.safetensors + physical-intelligence/), NOT the JAX training output.
 #
 # Usage:
-#   export HF_TOKEN=...
+#   # Uses the cached `hf auth login` credential, or export HF_TOKEN=...
 #   bash toolkits/so101/vast/upload_assets.sh                # upload all
 #   bash toolkits/so101/vast/upload_assets.sh --only sft,openpi
 #
@@ -27,12 +27,15 @@ set -Eeuo pipefail
 umask 077
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
+: "${RECAP_PYTHON:=${ROOT}/.venv-openpi-recap-v3/bin/python}"
 
-: "${HF_TOKEN:?Set HF_TOKEN}"
+: "${HF_TOKEN:=}"
 : "${SFT_DATASET_REPO:?Set SFT_DATASET_REPO (e.g. owner/so101-demo90-dataset)}"
 : "${ROLLOUT_DATASET_REPO:?Set ROLLOUT_DATASET_REPO (e.g. owner/so101-rollout-dataset)}"
 : "${OPENPI_CHECKPOINT_REPO:?Set OPENPI_CHECKPOINT_REPO (e.g. owner/pi05-so101-rlinf-checkpoint)}"
 : "${VALUE_CHECKPOINT_REPO:=}"
+: "${ADVANTAGE_TAG:=so101_q30}"
+: "${REQUIRE_ADVANTAGES:=0}"
 
 # Local source directories (overridable).
 : "${SFT_SRC:=/mnt/pqssd/so101/datasets/merged_lerobot_dataset_with_dagger30_trimmed}"
@@ -41,6 +44,14 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${VALUE_ROOT:=${ROOT}/outputs/so101_recap/value}"
 
 : "${PRIVATE:=0}"
+# Existing dataset repos can be updated without rescanning/reuploading their
+# unchanged data/videos. Use `meta` only after confirming local and remote
+# episode/frame counts match; `full` remains the safe default for new repos.
+: "${DATASET_UPLOAD_MODE:=full}"
+[[ "${DATASET_UPLOAD_MODE}" == "full" || "${DATASET_UPLOAD_MODE}" == "meta" ]] || {
+  echo "DATASET_UPLOAD_MODE must be full or meta" >&2
+  exit 2
+}
 
 # Comma-separated subset to upload: sft,rollout,openpi,value. Default: all
 # assets whose target repo is set (value only when VALUE_CHECKPOINT_REPO set).
@@ -80,18 +91,61 @@ upload_dir() {
   echo "[done] https://huggingface.co/${repo_id}"
 }
 
+upload_dataset() {
+  local repo_id="$1" src="$2"
+  if [[ "${DATASET_UPLOAD_MODE}" == "meta" ]]; then
+    [[ -d "${src}/meta" ]] || {
+      echo "Missing dataset metadata directory: ${src}/meta" >&2
+      exit 3
+    }
+    echo "[repo] dataset ${repo_id}"
+    create_repo "${repo_id}" dataset
+    echo "[upload] ${src}/meta -> ${repo_id}/meta"
+    hf upload "${repo_id}" "${src}/meta" meta --repo-type dataset \
+      --commit-message "assets: update RECAP metadata (${ADVANTAGE_TAG})"
+    echo "[done] https://huggingface.co/datasets/${repo_id}"
+  else
+    upload_dir "${repo_id}" "${src}" dataset
+  fi
+}
+
 wants() {
   [[ -z "${ONLY}" ]] && return 0
   [[ ",${ONLY}," == *",$1,"* ]]
 }
 
 ensure_hf
+if [[ -z "${HF_TOKEN}" ]]; then
+  hf auth whoami >/dev/null || {
+    echo "No Hugging Face credential found. Run 'hf auth login' or set HF_TOKEN." >&2
+    exit 2
+  }
+else
+  export HF_TOKEN
+fi
+
+[[ -x "${RECAP_PYTHON}" ]] || {
+  echo "Missing RECAP Python environment: ${RECAP_PYTHON}" >&2
+  exit 2
+}
+
+validate_args=(
+  --sft "${SFT_SRC}"
+  --rollout "${ROLLOUT_SRC}"
+  --policy "${OPENPI_SRC}"
+  --returns-tag so101
+  --advantage-tag "${ADVANTAGE_TAG}"
+)
+[[ -z "${VALUE_SRC}" ]] || validate_args+=(--value "${VALUE_SRC}")
+[[ "${REQUIRE_ADVANTAGES}" != "1" ]] || validate_args+=(--require-advantages)
+"${RECAP_PYTHON}" \
+  "${ROOT}/toolkits/so101/validate_recap_assets.py" "${validate_args[@]}"
 
 if wants sft; then
-  upload_dir "${SFT_DATASET_REPO}" "${SFT_SRC}" dataset
+  upload_dataset "${SFT_DATASET_REPO}" "${SFT_SRC}"
 fi
 if wants rollout; then
-  upload_dir "${ROLLOUT_DATASET_REPO}" "${ROLLOUT_SRC}" dataset
+  upload_dataset "${ROLLOUT_DATASET_REPO}" "${ROLLOUT_SRC}"
 fi
 if wants openpi; then
   upload_dir "${OPENPI_CHECKPOINT_REPO}" "${OPENPI_SRC}" model

@@ -49,12 +49,54 @@ from rlinf.models.embodiment.openpi.policies import (
 from .common import BaseDataLoaderImpl, ReCapMixtureDataset
 from .utils import (
     decode_image_struct_batch,
+    load_episode_outcome_labels,
     load_returns_sidecar,
     load_task_descriptions,
     validate_lerobot_v3_stack,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def split_episode_ids(
+    episode_ids: list[int],
+    *,
+    eval_fraction: float,
+    seed: int,
+    outcome_labels: dict[int, str] | None = None,
+) -> tuple[list[int], list[int]]:
+    """Deterministically split episodes, stratifying by outcome when available.
+
+    Every stratum with at least two episodes contributes at least one eval
+    episode and retains at least one training episode. This is important for
+    small real-robot datasets where failure episodes are rare.
+    """
+    if not 0.0 < eval_fraction < 1.0:
+        raise ValueError(f"eval_fraction must be in (0, 1), got {eval_fraction}")
+    if not episode_ids:
+        raise ValueError("episode_ids must not be empty")
+
+    strata: dict[str, list[int]] = {}
+    for episode in sorted(set(episode_ids)):
+        label = outcome_labels.get(episode, "unlabeled") if outcome_labels else "all"
+        strata.setdefault(label, []).append(episode)
+
+    rng = np.random.default_rng(seed)
+    eval_ids: set[int] = set()
+    for label in sorted(strata):
+        ids = np.asarray(strata[label], dtype=np.int64)
+        rng.shuffle(ids)
+        if len(ids) == 1:
+            n_eval = 0
+        else:
+            n_eval = min(len(ids) - 1, max(1, round(len(ids) * eval_fraction)))
+        eval_ids.update(int(value) for value in ids[:n_eval])
+
+    if not eval_ids and len(episode_ids) > 1:
+        eval_ids.add(int(rng.choice(np.asarray(episode_ids, dtype=np.int64))))
+    train_ids = sorted(set(episode_ids) - eval_ids)
+    return train_ids, sorted(eval_ids)
+
 
 _MODEL_TYPE_MAP = {
     "pi0": _openpi_model.ModelType.PI0,
@@ -228,6 +270,9 @@ class ValueDataset(Dataset):
         episode_percentage: Optional[float] = None,
         shuffle_episodes: bool = False,
         episode_seed: int = 42,
+        episode_split: Optional[str] = None,
+        eval_fraction: float = 0.2,
+        stratify_outcomes: bool = True,
         **kwargs,
     ):
         _known_unused = {
@@ -277,7 +322,35 @@ class ValueDataset(Dataset):
             )
 
         self._indices = None
-        if episode_percentage is not None and episode_percentage < 100:
+        selected: set[int] | None = None
+        if episode_split is not None:
+            if episode_split not in {"train", "eval"}:
+                raise ValueError(
+                    f"episode_split must be 'train' or 'eval', got {episode_split!r}"
+                )
+            all_eps = sorted(self._sidecar)
+            labels = (
+                load_episode_outcome_labels(local_path) if stratify_outcomes else None
+            )
+            train_eps, eval_eps = split_episode_ids(
+                all_eps,
+                eval_fraction=eval_fraction,
+                seed=episode_seed,
+                outcome_labels=labels,
+            )
+            selected = set(train_eps if episode_split == "train" else eval_eps)
+            logger.info(
+                "ValueDataset episode split: split=%s selected=%d/%d seed=%d "
+                "eval_fraction=%.3f stratified=%s episodes=%s",
+                episode_split,
+                len(selected),
+                len(all_eps),
+                episode_seed,
+                eval_fraction,
+                labels is not None,
+                sorted(selected),
+            )
+        elif episode_percentage is not None and episode_percentage < 100:
             if episode_percentage <= 0:
                 raise ValueError(
                     f"episode_percentage must be > 0, got {episode_percentage}"
@@ -290,6 +363,8 @@ class ValueDataset(Dataset):
                 selected = set(rng.choice(all_eps, size=num, replace=False).tolist())
             else:
                 selected = set(all_eps[:num])
+
+        if selected is not None:
             if hasattr(self._base, "episode_data_index"):  # lerobot < 0.4
                 idx = self._base.episode_data_index
                 self._indices = [

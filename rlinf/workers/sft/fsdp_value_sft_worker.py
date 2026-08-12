@@ -330,6 +330,9 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
                 "episode_percentage": entry.get("episode_percentage", None),
                 "shuffle_episodes": entry.get("shuffle_episodes", False),
                 "episode_seed": entry.get("episode_seed", 42),
+                "episode_split": entry.get("episode_split", None),
+                "eval_fraction": entry.get("eval_fraction", 0.2),
+                "stratify_outcomes": entry.get("stratify_outcomes", True),
                 "tag": data_cfg.get("tag", None),
             }
 
@@ -421,6 +424,10 @@ class FSDPValueSftWorker(FSDPModelManager, Worker):
                 action_dim=eval_entry.get("action_dim", shared["action_dim"]),
                 default_prompt=eval_entry.get("default_prompt", None),
                 max_samples=eval_max_samples,
+                episode_split=eval_entry.get("episode_split", None),
+                eval_fraction=eval_entry.get("eval_fraction", 0.2),
+                episode_seed=eval_entry.get("episode_seed", 42),
+                stratify_outcomes=eval_entry.get("stratify_outcomes", True),
                 tag=data_cfg.get("tag", None),
             )
             eval_sampler = None

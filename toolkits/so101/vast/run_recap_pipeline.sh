@@ -27,12 +27,16 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 : "${VALUE_GLOBAL_BATCH:=32}"
 : "${VALUE_MAX_STEPS:=8000}"
 : "${VALUE_SAVE_INTERVAL:=500}"
+: "${VALUE_VAL_INTERVAL:=250}"
+: "${VALUE_WARMUP_STEPS:=300}"
 : "${ADV_WORKERS:=2}"
 : "${ADV_PREFETCH:=2}"
+: "${ADVANTAGE_TAG:=so101_q30}"
 : "${CFG_MICRO_BATCH:=1}"
 : "${CFG_GLOBAL_BATCH:=8}"
 : "${CFG_MAX_STEPS:=3000}"
 : "${CFG_SAVE_INTERVAL:=250}"
+: "${CFG_WARMUP_STEPS:=300}"
 : "${TRAIN_EXPERT_ONLY:=1}"
 : "${HF_DOWNLOAD_WORKERS:=16}"
 : "${CHECKPOINT_UPLOAD_INTERVAL:=300}"
@@ -295,6 +299,21 @@ export RECAP_GEMMA_PATH="${GEMMA_ROOT}"
 export SO101_RECAP_DEMO_DATASET="${SFT_ROOT}"
 export SO101_RECAP_ROLLOUT_DATASET="${ROLLOUT_ROOT}"
 export SO101_RECAP_POLICY_CHECKPOINT="${POLICY_ROOT}"
+export SO101_RECAP_ADVANTAGE_TAG="${ADVANTAGE_TAG}"
+
+validate_assets() {
+  local require_advantages="${1:-0}" value_path="${2:-}"
+  local args=(
+    --sft "${SFT_ROOT}"
+    --rollout "${ROLLOUT_ROOT}"
+    --policy "${POLICY_ROOT}"
+    --returns-tag so101
+    --advantage-tag "${ADVANTAGE_TAG}"
+  )
+  [[ -z "${value_path}" ]] || args+=(--value "${value_path}")
+  [[ "${require_advantages}" != "1" ]] || args+=(--require-advantages)
+  python "${ROOT}/toolkits/so101/validate_recap_assets.py" "${args[@]}"
+}
 create_args=(repo create "${OUTPUT_MODEL_REPO}" --repo-type model --exist-ok)
 [[ "${OUTPUT_MODEL_PRIVATE}" == "1" ]] && create_args+=(--private)
 hf "${create_args[@]}"
@@ -323,19 +342,26 @@ if has_stage returns; then
   upload_dataset_meta "${ROLLOUT_DATASET_REPO}" "${ROLLOUT_ROOT}"
 fi
 
+# Returns are inputs to both Value and Advantage stages. When the returns stage
+# is skipped, this also proves that the downloaded HF dataset repos already
+# contain complete, frame-aligned sidecars and exact numeric quantiles.
+validate_assets 0
+
 sharding="no_shard"
 [[ "${GPU_COUNT}" == "1" ]] || sharding="full_shard"
 if has_stage value; then
   set_phase "train value model"
   value_args=(
     --config-path "${ROOT}/examples/offline_rl/config"
-    --config-name recap_so101_value_model_sft
+    --config-name recap_so101_value_model_sft_v2
     "runner.logger.log_path=${VALUE_ROOT}"
     "runner.max_steps=${VALUE_MAX_STEPS}"
     "runner.save_interval=${VALUE_SAVE_INTERVAL}"
-    "runner.val_check_interval=-1"
+    "runner.val_check_interval=${VALUE_VAL_INTERVAL}"
     "actor.micro_batch_size=${VALUE_MICRO_BATCH}"
     "actor.global_batch_size=${VALUE_GLOBAL_BATCH}"
+    "actor.optim.total_training_steps=${VALUE_MAX_STEPS}"
+    "actor.optim.lr_warmup_steps=${VALUE_WARMUP_STEPS}"
     "actor.model.siglip_path=${SIGLIP_ROOT}"
     "actor.model.gemma3_path=${GEMMA_ROOT}"
     "actor.model.tokenizer_path=${GEMMA_ROOT}"
@@ -370,10 +396,12 @@ if has_stage advantages && [[ -z "${VALUE_CHECKPOINT_DIR}" ]]; then
 fi
 
 if has_stage advantages; then
+  validate_assets 0 "${VALUE_CHECKPOINT_DIR}"
   set_phase "compute advantages"
   export RECAP_VALUE_CHECKPOINT="${VALUE_CHECKPOINT_DIR}"
   bash "${ROOT}/examples/offline_rl/advantage_labeling/recap/process/run_compute_advantages.sh" \
     recap_so101_compute_advantages --nproc "${GPU_COUNT}" \
+    "advantage.tag=${ADVANTAGE_TAG}" \
     "advantage.value_checkpoint=${VALUE_CHECKPOINT_DIR}" \
     "advantage.num_dataloader_workers_per_gpu=${ADV_WORKERS}" \
     "advantage.prefetch_factor=${ADV_PREFETCH}" \
@@ -382,9 +410,13 @@ if has_stage advantages; then
     "advantage.model.tokenizer_path=${GEMMA_ROOT}"
   upload_dataset_meta "${SFT_DATASET_REPO}" "${SFT_ROOT}"
   upload_dataset_meta "${ROLLOUT_DATASET_REPO}" "${ROLLOUT_ROOT}"
+  validate_assets 1 "${VALUE_CHECKPOINT_DIR}"
 fi
 
 if has_stage cfg; then
+  # In cfg-only mode this is the critical HF hand-off check: both downloaded
+  # datasets must expose the exact tag selected by data.advantage_tag.
+  validate_assets 1
   set_phase "train CFG policy"
   cfg_args=(
     --config-path "${ROOT}/examples/offline_rl/config"
@@ -394,7 +426,10 @@ if has_stage cfg; then
     "runner.save_interval=${CFG_SAVE_INTERVAL}"
     "actor.micro_batch_size=${CFG_MICRO_BATCH}"
     "actor.global_batch_size=${CFG_GLOBAL_BATCH}"
+    "actor.optim.total_training_steps=${CFG_MAX_STEPS}"
+    "actor.optim.lr_warmup_steps=${CFG_WARMUP_STEPS}"
     "actor.model.model_path=${POLICY_ROOT}"
+    "data.advantage_tag=${ADVANTAGE_TAG}"
     "actor.model.openpi.train_expert_only=$([[ "${TRAIN_EXPERT_ONLY}" == "1" ]] && echo true || echo false)"
     "actor.fsdp_config.sharding_strategy=${sharding}"
   )

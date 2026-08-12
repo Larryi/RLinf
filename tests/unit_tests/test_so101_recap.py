@@ -16,10 +16,16 @@ import pytest
 import torch
 from torch import nn
 
+from examples.offline_rl.advantage_labeling.recap.process.compute_returns import (
+    compute_returns_for_episode,
+)
+from rlinf.data.datasets.recap.stats import exact_quantiles
 from rlinf.data.datasets.recap.utils import (
+    load_episode_outcome_labels,
     load_episode_outcomes,
     load_task_descriptions,
 )
+from rlinf.data.datasets.recap.value_dataset import split_episode_ids
 from rlinf.models.embodiment.openpi.policies.so101_policy import (
     SO101Inputs,
     SO101Outputs,
@@ -56,6 +62,51 @@ def test_rollout_timeout_and_failure_are_both_unsuccessful(tmp_path):
     ).to_parquet(meta / "episode_outcomes.parquet", index=False)
 
     assert load_episode_outcomes(tmp_path) == {0: True, 1: False, 2: False}
+    assert load_episode_outcome_labels(tmp_path) == {
+        0: "success",
+        1: "timeout",
+        2: "failure",
+    }
+
+
+def test_unsuccessful_episode_has_negative_terminal_reward_and_returns():
+    returns, rewards = compute_returns_for_episode(
+        episode_length=3,
+        is_success=False,
+        gamma=1.0,
+        failure_reward=-300.0,
+    )
+
+    np.testing.assert_array_equal(rewards, [-1.0, -1.0, -300.0])
+    np.testing.assert_array_equal(returns, [-302.0, -301.0, -300.0])
+
+
+def test_episode_split_is_disjoint_reproducible_and_outcome_stratified():
+    labels = {
+        **dict.fromkeys(range(29), "success"),
+        **dict.fromkeys(range(29, 46), "timeout"),
+        **dict.fromkeys(range(46, 50), "failure"),
+    }
+    train_ids, eval_ids = split_episode_ids(
+        list(range(50)), eval_fraction=0.2, seed=42, outcome_labels=labels
+    )
+
+    assert set(train_ids).isdisjoint(eval_ids)
+    assert sorted(train_ids + eval_ids) == list(range(50))
+    assert [labels[episode] for episode in eval_ids].count("success") == 6
+    assert [labels[episode] for episode in eval_ids].count("timeout") == 3
+    assert [labels[episode] for episode in eval_ids].count("failure") == 1
+    assert (train_ids, eval_ids) == split_episode_ids(
+        list(range(50)), eval_fraction=0.2, seed=42, outcome_labels=labels
+    )
+
+
+def test_exact_quantiles_are_computed_over_frames_not_episode_quantile_means():
+    values = np.asarray([[0.0], [1.0], [2.0], [100.0]])
+    stats = exact_quantiles(values)
+
+    np.testing.assert_allclose(stats["q50"], [1.5])
+    np.testing.assert_allclose(stats["q99"], [97.06])
 
 
 def test_rollout_outcome_rejects_conflicting_success_flag(tmp_path):

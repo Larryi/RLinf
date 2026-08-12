@@ -80,7 +80,7 @@ git push -u origin so101-recap
 
 之后想同步官方更新：`git fetch upstream && git merge upstream/main`。
 
-## 两种运行模式
+## 三种运行模式
 
 ### 模式 A：云端全管道（默认）
 
@@ -88,12 +88,42 @@ git push -u origin so101-recap
 
 ### 模式 B：复用本机 value 模型
 
-本机已训好 value（`outputs/so101_recap/value/.../global_step_8000`），云端只跑后半段：
+本机已训好 Value，云端只跑后半段：
 
 ```bash
 export RECAP_STAGES="advantages,cfg"
 export VALUE_CHECKPOINT_REPO="<owner/value-checkpoint-repo>"   # upload_assets.sh 传上去的
+export VALUE_SRC="/absolute/path/to/global_step_3000/actor"
+export ADVANTAGE_TAG="so101_v2_gs3000_q30"
 ```
+
+### 模式 C：本机完成 Advantage，云端只训练 CFG
+
+这是已经在本机验证 Value 后最稳妥的交接方式。两个 dataset repo 必须包含
+`meta/advantages_${ADVANTAGE_TAG}.parquet`，且 `mixture_config.yaml` 中存在同名 tag：
+
+```bash
+export RECAP_STAGES="cfg"
+export ADVANTAGE_TAG="so101_v2_gs3000_q30"
+export REQUIRE_ADVANTAGES="1"
+export DATASET_UPLOAD_MODE="meta"  # 仅当远端与本地 Episode/帧数一致
+
+# VALUE_CHECKPOINT_REPO/VALUE_SRC 仅用于归档；cfg-only 不会下载 Value。
+export VALUE_CHECKPOINT_REPO="<owner/so101-value-v2-gs3000>"
+export VALUE_SRC="/home/larry/RLinf/logs/value_sft/recap_so101_value_model_sft_v2-20260812-02:24:53/recap_so101_value_sft_v2/checkpoints/global_step_3000/actor"
+
+bash toolkits/so101/vast/upload_assets.sh
+```
+
+`DATASET_UPLOAD_MODE=meta` 只更新已有 dataset repo 的 `meta/`，保留原有
+data/videos，适合在相同 90+50 数据上新增 Advantage tag。新建 dataset repo
+时应使用默认的 `full`。
+
+上传前脚本会验证完整帧覆盖、timeout/failure 负终奖、精确 q01/q99、
+Advantage tag、Value checkpoint 布局，以及 OpenPI checkpoint 内的 norm stats。
+CFG 的 state/action normalization 始终使用 OpenPI checkpoint 中的
+`physical-intelligence/behavior/norm_stats.json`；LeRobot `meta/stats.json`
+保持精确是为了其他数据工具和后续训练一致性，但不会替换基模坐标系。
 
 ## 启动与监控
 
@@ -128,6 +158,10 @@ export RESUME_RUN_ID="so101_recap_<之前的RUN_ID>"
 
 `cfg_rl_openpi_pytorch_so101.yaml` 的 `cpu_offload: true` + `gradient_checkpointing: true` 是为 24G 卡准备的。96G 上 `FAST_MODE=1`（默认）会自动给 CFG 阶段传
 `actor.fsdp_config.cpu_offload=false` + `actor.fsdp_config.gradient_checkpointing=false`，显著提速。如遇 OOM 改回 `FAST_MODE=0`。
+
+VAST 脚本会把 scheduler 的 `total_training_steps` 绑定到实际的
+`VALUE_MAX_STEPS` / `CFG_MAX_STEPS`。默认 CFG 为 300 steps warmup、3000
+steps cosine，避免短训练错误地全程停留在 YAML 的 5000-step warmup 中。
 
 ## 进阶优化：vast.ai snapshot 加速冷启动
 

@@ -32,7 +32,6 @@ is OFF by default; enable with ``--safety``.
 from __future__ import annotations
 
 import argparse
-import collections
 import signal
 import sys
 import threading
@@ -53,6 +52,13 @@ STATE_ACTION_NAMES = (
     "wrist_roll.pos",
     "gripper.pos",
 )
+
+
+def condition_task_prompt(task: str, advantage_condition: str) -> str:
+    """Apply the exact advantage suffix used by RECAP CFG training."""
+    if advantage_condition == "none":
+        return task
+    return f"{task}\nAdvantage: {advantage_condition}"
 
 
 
@@ -205,6 +211,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--port", default="/dev/ttyUSB0", help="SO-101 MotorBus serial port")
     parser.add_argument("--task", default="", help="task description; defaults to a generic prompt")
+    parser.add_argument(
+        "--advantage-condition",
+        choices=("positive", "none", "negative"),
+        default="positive",
+        help="append the exact RECAP training suffix to the task prompt",
+    )
     parser.add_argument("--num-steps", type=int, default=10, help="sampling steps per inference")
     parser.add_argument("--execute-steps", type=int, default=20,
                         help="steps executed per inference cycle; the model always predicts 50 and we re-infer"
@@ -291,7 +303,9 @@ def main() -> None:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    task = args.task or "Grab the blue pen and place it into the black box"
+    base_task = args.task or "Grab the blue pen and place it into the black box"
+    task = condition_task_prompt(base_task, args.advantage_condition)
+    print(f"[deploy] advantage condition={args.advantage_condition}")
     step_dt = 1.0 / args.frequency
     execute = args.execute_steps or 50
     segment = 0

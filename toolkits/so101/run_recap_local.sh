@@ -27,6 +27,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${ADV_WORKERS:=4}"
 : "${ADV_PREFETCH:=2}"
 : "${ADV_BATCH_SIZE:=128}"
+: "${SO101_RECAP_ADVANTAGE_TAG:=so101_q30}"
 : "${CFG_MICRO_BATCH:=2}"
 : "${CFG_GLOBAL_BATCH:=8}"
 : "${CFG_MAX_STEPS:=3000}"
@@ -57,6 +58,7 @@ export REPO_PATH="${ROOT}"
 export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export SO101_RECAP_DEMO_DATASET SO101_RECAP_ROLLOUT_DATASET
 export SO101_RECAP_POLICY_CHECKPOINT
+export SO101_RECAP_ADVANTAGE_TAG
 export HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HOME}/.cache/transformers}"
@@ -120,6 +122,7 @@ if has_stage advantages; then
     --config-path "${CONFIG_ROOT}"
     --config-name recap_so101_compute_advantages
     "advantage.value_checkpoint=${value_checkpoint}"
+    "advantage.tag=${SO101_RECAP_ADVANTAGE_TAG}"
     "advantage.batch_size=${ADV_BATCH_SIZE}"
     "advantage.num_dataloader_workers_per_gpu=${ADV_WORKERS}"
     "advantage.prefetch_factor=${ADV_PREFETCH}"
@@ -153,6 +156,7 @@ if has_stage cfg; then
     "runner.save_interval=${CFG_SAVE_INTERVAL}"
     "actor.micro_batch_size=${CFG_MICRO_BATCH}"
     "actor.global_batch_size=${CFG_GLOBAL_BATCH}"
+    "data.advantage_tag=${SO101_RECAP_ADVANTAGE_TAG}"
   )
   [[ -z "${CFG_RESUME_DIR:-}" ]] || cfg_args+=("+runner.resume_dir=${CFG_RESUME_DIR}")
   "${RECAP_PYTHON}" \

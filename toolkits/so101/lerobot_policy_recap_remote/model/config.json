@@ -1,0 +1,9 @@
+{
+  "type": "recap_remote",
+  "host": "127.0.0.1",
+  "port": 8001,
+  "chunk_size": 50,
+  "device": "cpu",
+  "use_amp": false,
+  "push_to_hub": false
+}
